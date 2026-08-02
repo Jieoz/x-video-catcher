@@ -1,0 +1,244 @@
+name: Build X Video Catcher APK
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Create GitHub Release and upload APK'
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Prepare project for CI
+        run: |
+          rm -f local.properties
+          sed -i '/^android\.aapt2FromMavenOverride=/d' gradle.properties || true
+          test -f settings.gradle.kts || test -f settings.gradle
+          test -f build.gradle.kts || test -f build.gradle
+          test -f app/build.gradle.kts || test -f app/build.gradle
+
+      # Without a fixed key, each runner signs with a freshly generated debug keystore,
+      # so every build has a different signature and Android refuses to install it over
+      # the previous one. Failing here rather than falling back keeps an
+      # un-upgradable APK from being published at all.
+      - name: Restore signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.XVC_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "::error::XVC_KEYSTORE_B64 secret is missing; refusing to build an APK that cannot be upgraded in place"
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/xvc-release.jks"
+          test -s "$RUNNER_TEMP/xvc-release.jks"
+          echo "keystore restored ($(stat -c%s "$RUNNER_TEMP/xvc-release.jks") bytes)"
+
+      - name: Run unit tests
+        run: gradle --no-daemon testDebugUnitTest
+
+      # On failure the assertion messages live only in the XML report, which is not in
+      # the job log — without this a failing test says "AssertionError at line N" and
+      # nothing about what was actually expected.
+      - name: Dump failing test details
+        if: failure()
+        run: |
+          for f in app/build/test-results/testDebugUnitTest/*.xml; do
+            [ -f "$f" ] || continue
+            python3 - "$f" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          for case in root.iter('testcase'):
+              for bad in list(case.iter('failure')) + list(case.iter('error')):
+                  print(f"--- {case.get('classname')}.{case.get('name')}")
+                  print((bad.text or bad.get('message') or '').strip()[:2000])
+          PY
+          done
+
+      # Gradle prints nothing on success, so a green step alone does not prove any test
+      # executed — a silently empty test set would look identical. This reports the real
+      # per-class counts and fails on zero.
+      - name: Report unit test counts
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          files = glob.glob("app/build/test-results/testDebugUnitTest/*.xml")
+          if not files:
+              sys.exit("no test result XML: tests did not run")
+          total = failed = 0
+          for f in sorted(files):
+              r = ET.parse(f).getroot()
+              t = int(r.get("tests")); bad = int(r.get("failures")) + int(r.get("errors"))
+              total += t; failed += bad
+              print(f"{r.get('name')}: tests={t} failures={bad} skipped={r.get('skipped')}")
+          print(f"TOTAL tests={total} failures={failed}")
+          if total == 0:
+              sys.exit("zero tests executed")
+          if failed:
+              sys.exit(f"{failed} test failure(s)")
+          PY
+
+      - name: Build debug APK
+        env:
+          XVC_KEYSTORE_PATH: ${{ runner.temp }}/xvc-release.jks
+          XVC_KEYSTORE_PASSWORD: ${{ secrets.XVC_KEYSTORE_PASSWORD }}
+          XVC_KEY_ALIAS: ${{ secrets.XVC_KEY_ALIAS }}
+          XVC_KEY_PASSWORD: ${{ secrets.XVC_KEY_PASSWORD }}
+        run: gradle --no-daemon assembleDebug
+
+      # The signing config is applied conditionally in Gradle, so a missing or misread
+      # env var would silently fall back to the per-runner debug key and produce another
+      # APK that cannot be installed over the last one. Pin the expected certificate
+      # digest so that regression fails the build instead of reaching the device.
+      - name: Verify APK signature is the fixed key
+        run: |
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          ACTUAL=$("$BT/apksigner" verify --print-certs "$APK" \
+            | grep -m1 -i 'certificate SHA-256 digest' \
+            | sed -E 's/.*digest: *//' | tr 'A-Z' 'a-z')
+          # SHA-256 of the fixed key's certificate. If this ever has to change, every
+          # installed copy must be uninstalled first — so treat it as frozen.
+          EXPECTED=1815c41d47083714332df8399f97d4abcaad8803f7a7d6b1aed25507491b8d2d
+          echo "signer=$ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::APK is not signed with the fixed release key (got $ACTUAL, want $EXPECTED). In-place upgrade would fail."
+            exit 1
+          fi
+          echo "signature OK: fixed key, in-place upgrade preserved"
+
+      - name: Verify Xposed module contract in APK
+        run: |
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "apk=$APK build-tools=$BT"
+          # The framework loads the module by the class named in assets/xposed_init.
+          # A missing or misspelled entry means LSPosed silently ignores the module.
+          ENTRY=$(unzip -p "$APK" assets/xposed_init | tr -d '\r\n')
+          test "$ENTRY" = "com.jiesa.xvideocatcher.hook.XVideoCatcherModule"
+          # xposedminversion is what marks this as a legacy module to LSPosed.
+          "$BT/aapt2" dump xmltree --file AndroidManifest.xml "$APK" | grep -q 'xposedminversion'
+          # The Xposed API must stay provided-only; a bundled copy breaks hooking.
+          unzip -l "$APK" | grep -q 'classes.dex'
+          test -z "$(unzip -l "$APK" | grep -i 'de/robv/android/xposed' || true)"
+          # The probe log must not depend on the hooked app reaching a provider we own.
+          # Under API 30+ package visibility filtering X cannot resolve our authority
+          # (we cannot add <queries> to X's manifest), so such a sink silently drops
+          # every record — which is exactly how the first build shipped broken.
+          "$BT/aapt2" dump xmltree --file AndroidManifest.xml "$APK" > /tmp/mf.txt
+          test -z "$(grep -A3 'E: provider' /tmp/mf.txt | grep 'authorities' || true)"
+          echo "module contract OK: entry=$ENTRY, no provider-based log sink"
+
+      # Asserts the URL grammar helpers are really in the artifact, by parsing the dex
+      # method table. Two cheaper checks are both unreliable here and were tried first:
+      # `dexdump` in the SDK is x86_64 and exits 126 on an ARM host, producing empty
+      # output indistinguishable from "not found"; and grepping `strings` on classes.dex
+      # alone missed everything, because these classes land in classes3.dex.
+      - name: Verify URL parsing is present in the APK
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          rm -rf dexcheck && mkdir dexcheck && cd dexcheck
+          unzip -oq "$GITHUB_WORKSPACE/app/build/outputs/apk/debug/app-debug.apk" 'classes*.dex'
+          python3 "$GITHUB_WORKSPACE/tools/dexcheck.py" \
+            MediaUrls \
+            isInteresting,isManifest,isMasterPlaylist,mediaId,resolution,highestResolution,isAudioTrack,isVideoTrack,isPhoto,photoKey,highestQualityPhoto \
+            classes*.dex
+
+      # The reflection layer that reads X's own tweet objects. This is what replaced the
+      # URL-capture probe: media now comes from the host's model rather than from sniffed
+      # traffic, so these are the methods whose absence would make the entry a no-op.
+      - name: Verify host reflection layer is present in the APK
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/dexcheck"
+          python3 "$GITHUB_WORKSPACE/tools/dexcheck.py" \
+            HostShapes \
+            uniqueFieldOfType,uniqueFieldOfTypeName,mediaTypeField,videoInfoField,variantsField,readVariant \
+            classes*.dex
+          python3 "$GITHUB_WORKSPACE/tools/dexcheck.py" \
+            TweetMedia \
+            extract \
+            classes*.dex
+
+      # The download and UI layers. These are gated for the same reason as the parsers: the
+      # module is loaded by name at runtime, so a class that silently failed to make it into
+      # the APK produces a menu with no download entry and no error anywhere.
+      - name: Verify download and share-sheet layers are present in the APK
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/dexcheck"
+          check() {
+            python3 "$GITHUB_WORKSPACE/tools/dexcheck.py" "$1" "$2" classes*.dex
+          }
+          check DownloadTarget photoSpec,videoSpec
+          check MediaSaver save
+          check HostDownloader download
+          check ShareSheetInjector install
+          check ModuleStrings downloadLabel,startedLabel,successLabel,failureLabel,noMediaLabel
+
+      # The checker must be able to fail. A tool that reports success unconditionally is
+      # indistinguishable from a passing gate, and this one has already been wrong once
+      # (an x86_64 dexdump exiting 126 with empty output read as "not found").
+      - name: Self-test the dex checker
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/dexcheck"
+          if python3 "$GITHUB_WORKSPACE/tools/dexcheck.py" \
+               HostShapes readVariant,definitelyNotARealMethod classes*.dex >/dev/null 2>&1; then
+            echo "::error::dexcheck.py accepted a method that does not exist; the gate proves nothing"
+            exit 1
+          fi
+          echo "dexcheck self-test OK: fabricated method correctly rejected"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: x-video-catcher-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+
+      - name: Generate release metadata
+        if: github.event_name == 'workflow_dispatch' && inputs.release
+        run: |
+          echo "RELEASE_TAG=x-video-catcher-$(date +'%Y.%m.%d-%H%M%S')" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        if: github.event_name == 'workflow_dispatch' && inputs.release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: X Video Catcher ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          files: app/build/outputs/apk/debug/*.apk
