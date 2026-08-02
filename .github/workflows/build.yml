@@ -225,10 +225,30 @@ jobs:
           name: x-video-catcher-debug-apk
           path: app/build/outputs/apk/debug/*.apk
 
+      # The tag comes from the APK itself, not from a timestamp: the version lives in
+      # app/build.gradle.kts and nowhere else, so reading it back from the built
+      # artifact keeps tag, versionName and installed package in lockstep. A timestamp
+      # tag says nothing about whether a build supersedes the one on the device.
       - name: Generate release metadata
         if: github.event_name == 'workflow_dispatch' && inputs.release
         run: |
-          echo "RELEASE_TAG=x-video-catcher-$(date +'%Y.%m.%d-%H%M%S')" >> $GITHUB_ENV
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          BADGING=$("$BT/aapt2" dump badging "$APK")
+          VNAME=$(printf '%s' "$BADGING" | sed -nE "s/.*versionName='([^']*)'.*/\1/p" | head -1)
+          VCODE=$(printf '%s' "$BADGING" | sed -nE "s/.*versionCode='([0-9]+)'.*/\1/p" | head -1)
+          test -n "$VNAME" && test -n "$VCODE"
+          # Asset names must be self-describing and pure ASCII: GitHub silently
+          # collapses non-ASCII in asset filenames, and a bare app-debug.apk tells
+          # the person downloading it nothing.
+          mkdir -p dist_release
+          NAME="XVideoCatcher-v${VNAME}-LSPosed-Android.apk"
+          cp "$APK" "dist_release/$NAME"
+          echo "RELEASE_TAG=v${VNAME}" >> $GITHUB_ENV
+          echo "RELEASE_NAME=X Video Catcher v${VNAME} (versionCode ${VCODE})" >> $GITHUB_ENV
+          echo "RELEASE_ASSET=dist_release/$NAME" >> $GITHUB_ENV
+          echo "staged $NAME ($(stat -c%s "dist_release/$NAME") bytes)"
 
       - name: Create GitHub Release
         if: github.event_name == 'workflow_dispatch' && inputs.release
@@ -237,8 +257,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: X Video Catcher ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_NAME }}
           generate_release_notes: true
           draft: false
           prerelease: false
-          files: app/build/outputs/apk/debug/*.apk
+          files: ${{ env.RELEASE_ASSET }}
