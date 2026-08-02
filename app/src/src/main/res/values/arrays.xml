@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <!-- Apps LSPosed should pre-select as this module's scope. Only X is meaningful: the hooks
-         target its share sheet and would find nothing anywhere else. -->
-    <string-array name="xposed_scope">
-        <item>com.twitter.android</item>
-    </string-array>
-</resources>

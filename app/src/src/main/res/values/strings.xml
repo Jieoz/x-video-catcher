@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <!-- Shown in LSPosed's module list. User-facing text inside X does not come from here:
-         module resources are not reliably reachable from the host process, so those strings are
-         inlined in ModuleStrings.kt instead. -->
-    <string name="app_name">X Video Catcher</string>
-</resources>
