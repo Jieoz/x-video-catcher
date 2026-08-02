@@ -3,7 +3,9 @@
 /local.properties
 /.idea
 .DS_Store
-/build
+# Not /build: this is a single-module project whose output lands in app/build, and anchoring
+# the pattern to the root missed it entirely.
+build/
 /captures
 .externalNativeBuild
 .cxx
