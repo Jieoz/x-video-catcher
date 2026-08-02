@@ -8,9 +8,15 @@ package com.jiesa.xvideocatcher.hook
  * That means a hard-coded name is only valid for the exact build it was read from.
  *
  * The values below were read out of X 12.13.0-beta.0 (versionCode 312130100) by walking the dex
- * tables directly. They are the *starting guess*. Everything that can drift is re-derived at
- * runtime by shape ([HostShapes]) so a host update degrades into "download entry missing"
- * rather than a crash inside X.
+ * tables directly. They are *candidates only* — never trusted on their own. Class names are
+ * verified structurally by [HostResolver] and fields by shape via [HostShapes], so a host update
+ * degrades into "download entry missing" rather than a crash inside X.
+ *
+ * Why a name alone is never enough, measured rather than assumed: in 12.13.0-release.0
+ * (versionCode 312130000) the controller is `com.twitter.tweet.action.legacy.e0`, while the name
+ * recorded from beta — `…legacy.h0` — is a *different class that still exists* (1 field, no show
+ * method). `loadClass` on it succeeds, so a name-only lookup logged "controller resolved" and then
+ * failed on the missing method. Both FATAL lines users saw came from that single wrong name.
  *
  * Verification anchors — string constants in the host that identify a class regardless of its
  * obfuscated name. These are what make re-derivation possible, and they are stable because they
@@ -47,14 +53,22 @@ internal object HostClasses {
      * Share-sheet controller. Holds the item list that gets rendered, and the tweet the sheet
      * was opened for.
      *
-     *  - field `a` : `java.util.List` — the entries shown in the sheet
-     *  - field `b` : [TWEET_WRAPPER] — the tweet in question
-     *  - method `h(FragmentManager)` : void — shows the sheet
+     * Shape, identical in both builds examined and what [HostResolver] matches on:
+     *
+     *  - exactly one `java.util.List` instance field — the entries shown in the sheet
+     *  - one field typed into `com.twitter.model.core` — the tweet the sheet was opened for
+     *  - a `void` method taking exactly one `FragmentManager` — shows the sheet
+     *
+     * That combination is unique app-wide: of the two classes in 12.13.0-release.0 declaring
+     * `void(FragmentManager)` plus a `List`, the other is `BaseConversationActionsDialog`, which
+     * has no `com.twitter.model.core` field. The show method's *name* is not recorded, because it
+     * is found by signature; only the package is load-bearing here.
+     *
+     * Candidate name is from beta; release resolves to `…legacy.e0` at runtime.
      */
     const val SHARE_SHEET_CONTROLLER = "com.twitter.tweet.action.legacy.h0"
     const val SHARE_SHEET_ITEMS_FIELD = "a"
     const val SHARE_SHEET_TWEET_FIELD = "b"
-    const val SHARE_SHEET_SHOW_METHOD = "h"
 
     /** Tweet wrapper (`Parcelable`). Field `a` is the tweet body, field `c` a nested quote. */
     const val TWEET_WRAPPER = "com.twitter.model.core.e"

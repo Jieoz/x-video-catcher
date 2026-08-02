@@ -40,46 +40,35 @@ internal class ShareSheetInjector(
     private val sentinelActionId = 0x5EED_0001
 
     fun install() {
-        val controller = runCatching { classLoader.loadClass(HostClasses.SHARE_SHEET_CONTROLLER) }
-            .getOrNull()
+        // Resolved by shape, not by the recorded name. In 12.13.0-release.0 the recorded
+        // controller name (`…legacy.h0`, read from 12.13.0-beta.0) loads successfully but is an
+        // unrelated 1-field class, so a name-only lookup reported "resolved" and then failed to
+        // find the show method. See HostResolver.
+        val controller = HostResolver.shareSheetController(classLoader)
         if (controller == null) {
-            DiagLog.line("FATAL share sheet controller not found (${HostClasses.SHARE_SHEET_CONTROLLER})")
             DiagLog.flushNow()
             XposedBridge.log("XVC: share sheet controller not found; entry not installed")
             return
         }
-        DiagLog.line("share sheet controller resolved: ${controller.name}")
+        DiagLog.line("share sheet controller resolved: ${controller.cls.name}")
 
         hookSheetShown(controller)
-        hookItemDispatch(controller)
+        hookItemDispatch(controller.cls)
     }
 
     /** Appends the download entry to the item list right before the sheet is shown. */
-    private fun hookSheetShown(controller: Class<*>) {
-        val showMethods = controller.declaredMethods.filter {
-            it.name == HostClasses.SHARE_SHEET_SHOW_METHOD &&
-                it.returnType == Void.TYPE &&
-                it.parameterTypes.size == 1
-        }
-        if (showMethods.isEmpty()) {
-            DiagLog.line("FATAL no show method on ${controller.name}; entry not installed")
-            DiagLog.flushNow()
-            XposedBridge.log("XVC: no show method on ${controller.name}; entry not installed")
-            return
-        }
-        DiagLog.line("hooked ${showMethods.size} show method(s)")
+    private fun hookSheetShown(controller: HostResolver.Controller) {
+        DiagLog.line("hooked show method ${controller.showMethod.name}(FragmentManager)")
 
-        for (m in showMethods) {
-            XposedBridge.hookMethod(m, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    runCatching { appendEntry(param.thisObject) }
-                        .onFailure {
-                            DiagLog.line("ERROR append failed: $it")
-                            XposedBridge.log("XVC: append failed: $it")
-                        }
-                }
-            })
-        }
+        XposedBridge.hookMethod(controller.showMethod, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                runCatching { appendEntry(param.thisObject) }
+                    .onFailure {
+                        DiagLog.line("ERROR append failed: $it")
+                        XposedBridge.log("XVC: append failed: $it")
+                    }
+            }
+        })
     }
 
     /**
@@ -139,15 +128,8 @@ internal class ShareSheetInjector(
      * row, and it is present in every build examined.
      */
     private fun buildEntry(sheet: Any): Any? {
-        val itemClass = runCatching { classLoader.loadClass(HostClasses.ACTION_SHEET_ITEM) }
-            .getOrNull() ?: return null
-
-        val ctor = itemClass.declaredConstructors.firstOrNull { c ->
-            val p = c.parameterTypes
-            p.size == 3 && p[0] == Int::class.javaPrimitiveType &&
-                p[1] == Int::class.javaPrimitiveType && p[2] == String::class.java
-        } ?: return null
-        ctor.isAccessible = true
+        val itemClass = HostResolver.actionSheetItem(classLoader) ?: return null
+        val ctor = HostResolver.entryConstructor(itemClass) ?: return null
 
         val title = moduleResources.downloadLabel(hostContext(sheet))
         // Icon 0 = no icon. Referencing one of X's own drawables would look tidier but ties the
@@ -164,8 +146,7 @@ internal class ShareSheetInjector(
      * — measurable on low-end hardware, for no gain.
      */
     private fun hookItemDispatch(controller: Class<*>) {
-        val itemClass = runCatching { classLoader.loadClass(HostClasses.ACTION_SHEET_ITEM) }
-            .getOrNull()
+        val itemClass = HostResolver.actionSheetItem(classLoader)
         val single = controller.declaredMethods.filter {
             !Modifier.isStatic(it.modifiers) && it.parameterTypes.size == 1
         }

@@ -1,5 +1,6 @@
 package com.jiesa.xvideocatcher.hook
 
+import com.jiesa.xvideocatcher.DiagLog
 import com.jiesa.xvideocatcher.DownloadTarget
 import com.jiesa.xvideocatcher.MediaUrls
 import java.lang.reflect.Modifier
@@ -35,9 +36,32 @@ internal object TweetMedia {
         val mediaClass = runCatching {
             tweet.javaClass.classLoader?.loadClass(HostClasses.MEDIA_ENTITY)
         }.getOrNull()
+        if (mediaClass == null) {
+            // Not fatal — traversal falls back to shape matching — but it means the recorded
+            // media-entity name drifted, which is worth knowing before anything else fails.
+            DiagLog.line("media entity class ${HostClasses.MEDIA_ENTITY} not found; using shape match")
+        }
 
         val entities = collectMediaEntities(tweet, mediaClass)
-        return entities.mapNotNull { toTarget(it) }.distinctBy { it.url }
+        if (entities.isEmpty()) {
+            // Three different causes produce the same empty result, and the caller can only
+            // report "no downloadable media". Naming them here is what separates a text-only
+            // post from a host change that broke traversal.
+            DiagLog.line(
+                "no media entities in tweet graph (depth<=$MAX_DEPTH, " +
+                    "root=${tweet.javaClass.name}, byClass=${mediaClass != null})"
+            )
+            return emptyList()
+        }
+
+        val out = entities.mapNotNull { toTarget(it) }.distinctBy { it.url }
+        if (out.isEmpty()) {
+            DiagLog.line(
+                "found ${entities.size} media entity(s) but no usable rendition; " +
+                    "types=${entities.joinToString { mediaTypeName(it) ?: "?" }}"
+            )
+        }
+        return out
     }
 
     /**
