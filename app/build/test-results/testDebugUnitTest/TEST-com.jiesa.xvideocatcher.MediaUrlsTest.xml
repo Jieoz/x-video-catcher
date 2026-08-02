@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.jiesa.xvideocatcher.MediaUrlsTest" tests="35" skipped="0" failures="0" errors="0" timestamp="2026-08-02T09:27:58" hostname="72194d6f64f9" time="0.012">
+  <properties/>
+  <testcase name="portrait and landscape are ranked by pixel count, not height" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.003"/>
+  <testcase name="webp is replaced with jpg rather than preserved" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="captured ext_tw_video variants are still not masters" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="avatars, banners, emoji and card previews are not photos to save" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.001"/>
+  <testcase name="existing format is kept when replacing the size" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="master playlist is distinguished from variant playlist" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="photo url is rewritten to the largest size" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="robots txt on the video host is dropped" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.001"/>
+  <testcase name="captured ext_tw_video master is recognised despite the pu segment" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="rewriting leaves video urls alone" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="media id groups the segments of one video" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="captured audio track is interesting" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="highest resolution ignores urls that carry none" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="non http and empty inputs are dropped" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="photo rewrite never asks for orig, which 404s on png photos" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="highest resolution wins, from the real variant set of one captured video" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="master playlist with a query string is still recognised" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="tweet photos and video posters are interesting" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="media path on an unknown cdn host still passes" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="rewriting is idempotent" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="graphql, telemetry and profile images are dropped" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.001"/>
+  <testcase name="audio and video tracks are told apart" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="off-ladder resolutions are read rather than matched" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="captured video poster is rewritten to the query form" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="rewritten photo url always carries a format" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="resolution is read from variant and segment urls" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="user upload and gif paths are interesting" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.001"/>
+  <testcase name="manifest is distinguished from segment" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="photo extension is folded into the format parameter" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="photo key is stable across renderings of one image" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="png photos keep their format instead of being forced to jpg" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.001"/>
+  <testcase name="captured variant playlist, init segment and media segment are interesting" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="captured ext_tw_video tracks and id are parsed" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="photos are told apart from video" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <testcase name="captured master playlist is interesting" classname="com.jiesa.xvideocatcher.MediaUrlsTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

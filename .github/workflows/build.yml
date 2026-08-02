@@ -204,6 +204,11 @@ jobs:
           check HostDownloader download
           check ShareSheetInjector install
           check ModuleStrings downloadLabel,startedLabel,successLabel,failureLabel,noMediaLabel
+          # The diagnostic log is the only way a user can see why the entry did not appear —
+          # the module has no UI of its own, so if these are missing the fallback is telling
+          # someone to attach a computer and read logcat.
+          check DiagLog line,bindContext,flushNow,path
+          check DiagSink append,fileName,displayPath
 
       # The checker must be able to fail. A tool that reports success unconditionally is
       # indistinguishable from a passing gate, and this one has already been wrong once

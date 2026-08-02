@@ -1,0 +1,13 @@
+#Sun Aug 02 17:28:27 CST 2026
+path.3=13/classes.dex
+path.2=10/classes.dex
+path.1=0/classes.dex
+path.0=classes.dex
+base.3=/workspace/tmp/xvc-standalone/app/build/intermediates/dex/debug/mergeProjectDexDebug/13/classes.dex
+base.2=/workspace/tmp/xvc-standalone/app/build/intermediates/dex/debug/mergeProjectDexDebug/10/classes.dex
+base.1=/workspace/tmp/xvc-standalone/app/build/intermediates/dex/debug/mergeProjectDexDebug/0/classes.dex
+base.0=/workspace/tmp/xvc-standalone/app/build/intermediates/dex/debug/mergeExtDexDebug/classes.dex
+renamed.3=classes4.dex
+renamed.2=classes3.dex
+renamed.1=classes2.dex
+renamed.0=classes.dex

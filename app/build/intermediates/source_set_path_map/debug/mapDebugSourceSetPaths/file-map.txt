@@ -1,0 +1,7 @@
+com.jiesa.xvideocatcher.app-pngs-0 /workspace/tmp/xvc-standalone/app/build/generated/res/pngs/debug
+com.jiesa.xvideocatcher.app-resValues-1 /workspace/tmp/xvc-standalone/app/build/generated/res/resValues/debug
+com.jiesa.xvideocatcher.app-packageDebugResources-2 /workspace/tmp/xvc-standalone/app/build/intermediates/incremental/debug/packageDebugResources/merged.dir
+com.jiesa.xvideocatcher.app-packageDebugResources-3 /workspace/tmp/xvc-standalone/app/build/intermediates/incremental/debug/packageDebugResources/stripped.dir
+com.jiesa.xvideocatcher.app-debug-4 /workspace/tmp/xvc-standalone/app/build/intermediates/merged_res/debug/mergeDebugResources
+com.jiesa.xvideocatcher.app-debug-5 /workspace/tmp/xvc-standalone/app/src/debug/res
+com.jiesa.xvideocatcher.app-main-6 /workspace/tmp/xvc-standalone/app/src/main/res

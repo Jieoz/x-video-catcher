@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.jiesa.xvideocatcher.DiagSinkTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-08-02T09:27:58" hostname="72194d6f64f9" time="0.036">
+  <properties/>
+  <testcase name="append twice keeps earlier records" classname="com.jiesa.xvideocatcher.DiagSinkTest" time="0.023"/>
+  <testcase name="missing directory is created" classname="com.jiesa.xvideocatcher.DiagSinkTest" time="0.001"/>
+  <testcase name="a record containing a carriage return still occupies one line" classname="com.jiesa.xvideocatcher.DiagSinkTest" time="0.002"/>
+  <testcase name="a record containing a newline still occupies one line" classname="com.jiesa.xvideocatcher.DiagSinkTest" time="0.001"/>
+  <testcase name="displayPath is the advertised location and carries the file name" classname="com.jiesa.xvideocatcher.DiagSinkTest" time="0.002"/>
+  <testcase name="file name carries the date" classname="com.jiesa.xvideocatcher.DiagSinkTest" time="0.001"/>
+  <testcase name="empty batch creates no file" classname="com.jiesa.xvideocatcher.DiagSinkTest" time="0.004"/>
+  <testcase name="append writes one line per record" classname="com.jiesa.xvideocatcher.DiagSinkTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

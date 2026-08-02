@@ -1,0 +1,2 @@
+com.jiesa.xvideocatcher:string/app_name = 0x7f020000
+com.jiesa.xvideocatcher:array/xposed_scope = 0x7f010000

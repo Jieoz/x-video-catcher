@@ -181,9 +181,49 @@ unit tests caught neither the `name=orig` 404 nor the webp downgrade — both ne
 The **下载视频** entry appears in the share sheet. Nothing happens when you open the module itself —
 it has no UI.
 
-If the entry does not appear, check logcat for `XVC:`. The module logs its install line with both
-the running host version and the version its anchors were read from, so a host update that moved
-the sheet controller is visible there rather than silent.
+## Diagnosing it from the phone
+
+Everything the module does is written to a log file on the device:
+
+```
+Download/XVideoCatcher/xvc-diag-YYYYMMDD.log
+```
+
+Open it with any file manager, or long-press to share it. No computer, no adb, no logcat.
+
+The file is written by X's process, not by this module's app. That is forced by how the module runs:
+its code executes under X's UID, so there is nowhere else it can write that is readable afterwards
+without root. The consequence to know about is that **the module's own app cannot read this file** —
+a non-media file in `Download/` is visible only to the app that created it, and `READ_MEDIA_*` does
+not cover `.log`. Any in-app "view log" button could only ever show zero records, which is why there
+isn't one.
+
+The log answers the questions worth asking, in order:
+
+| What you see | What the log says |
+| --- | --- |
+| Nothing at all, no file | Module never loaded — not enabled in LSPosed, scope missing, or X not force-stopped |
+| `=== module attached ===` | Hook is live; the line after it gives module and host versions |
+| `NOTE host version differs…` | X updated past the build these anchors came from — first thing to suspect |
+| `FATAL share sheet controller not found` | X moved or renamed the sheet; needs new anchors |
+| `sheet opened: no downloadable media found` | Post has nothing to download (expected on text-only posts) |
+| `ENTRY SKIPPED: …` | Sheet was found but the entry could not be added — the message names which step |
+| `entry added to sheet` | Entry is there; if you don't see it, the problem is rendering, not injection |
+| `download entry tapped` | The tap reached this module |
+| `FAILED <file>: <reason>` | Per-item download failure with its cause |
+| `download finished: saved=N…` | Outcome counts for the batch |
+
+Each of those `ENTRY SKIPPED` messages used to be a silent `return`. Five different causes produced
+one identical symptom — a share sheet with no download entry — and none of them said anything. That
+was the actual defect: not the missing feature, but that the failure was unreportable.
+
+Records are queued and written by a low-priority daemon thread, and the queue is flushed once at
+attach so the file proves attachment before you touch anything. Records that cannot be written stay
+queued rather than being dropped; the earliest ones are produced before a `Context` exists, and
+those are precisely the ones that prove the module loaded.
+
+`XposedBridge.log` still receives the fatal lines, for anyone who prefers LSPosed's own log viewer.
+It is a second copy, not the primary path.
 
 ## Limits
 
