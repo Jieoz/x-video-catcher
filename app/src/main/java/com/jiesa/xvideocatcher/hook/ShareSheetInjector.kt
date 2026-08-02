@@ -39,6 +39,25 @@ internal class ShareSheetInjector(
      */
     private val sentinelActionId = 0x5EED_0001
 
+    /**
+     * The controller instance of the most recently shown sheet.
+     *
+     * The click arrives on the dialog fragment (`o.u(int)`), not on the controller, so the tweet is
+     * no longer reachable from the hooked object. The controller is captured when the sheet is
+     * shown and read back on tap.
+     *
+     * Held weakly: the host owns this object's lifetime and a strong reference here would pin a
+     * dismissed sheet — and with it a tweet and a Context — for as long as the host process lives.
+     * Only ever written from the host's main thread (sheet show) and read on the same thread
+     * (click), but marked volatile so a stale value cannot be observed if the host ever moves
+     * either callback.
+     */
+    @Volatile
+    private var shownSheetRef: java.lang.ref.WeakReference<Any>? = null
+
+    private val shownSheet: Any?
+        get() = shownSheetRef?.get()
+
     fun install() {
         // Resolved by shape, not by the recorded name. In 12.13.0-release.0 the recorded
         // controller name (`…legacy.h0`, read from 12.13.0-beta.0) loads successfully but is an
@@ -62,6 +81,9 @@ internal class ShareSheetInjector(
 
         XposedBridge.hookMethod(controller.showMethod, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
+                // Recorded even when the append below fails, so a tap can still report *why*
+                // rather than looking like the sheet was never seen.
+                shownSheetRef = java.lang.ref.WeakReference(param.thisObject)
                 runCatching { appendEntry(param.thisObject) }
                     .onFailure {
                         DiagLog.line("ERROR append failed: $it")
@@ -146,64 +168,62 @@ internal class ShareSheetInjector(
      * — measurable on low-end hardware, for no gain.
      */
     private fun hookItemDispatch(controller: Class<*>) {
-        val itemClass = HostResolver.actionSheetItem(classLoader)
-        val single = controller.declaredMethods.filter {
-            !Modifier.isStatic(it.modifiers) && it.parameterTypes.size == 1
-        }
-
-        // Prefer methods typed to the item class itself. `isAssignableFrom` is deliberately not
-        // used for the primary pass: every class is assignable to Object, so it would match any
-        // one-argument method and defeat the narrowing.
-        var candidates = single.filter { m ->
-            val p = m.parameterTypes[0]
-            if (itemClass != null) p == itemClass
-            else p.name.startsWith("com.twitter.ui.dialog.actionsheet")
-        }
-
-        // Only if nothing is typed that precisely, widen to Object-parameter methods — the host
-        // does declare some dispatch that way. This pass is strictly a fallback because it is
-        // broad enough to sit on unrelated call paths.
-        if (candidates.isEmpty()) {
-            candidates = single.filter { it.parameterTypes[0] == Any::class.java }
-        }
-
-        if (candidates.isEmpty()) {
-            DiagLog.line("FATAL no item dispatch method on ${controller.name}; clicks inert")
+        // Clicks do NOT come back through the controller. Verified against 12.13.0-release.0: no
+        // method on the controller takes the item class at all, and the only such method app-wide
+        // is a Builder's add-item call. The sheet is a RecyclerView whose ViewHolder
+        // (actionsheet.e) holds a com.twitter.app.common.dialog.o and dispatches through
+        // `o.u(int)` — where the int IS the action id, which is exactly what the sentinel needs.
+        //
+        // o is an interface; BaseDialogFragment implements u(int) and none of its 10 subclasses
+        // override it, so one hook on the base covers every sheet.
+        val dispatch = HostResolver.clickDispatch(classLoader)
+        if (dispatch == null) {
+            DiagLog.line("FATAL no click dispatch u(int) found; clicks inert")
             DiagLog.flushNow()
-            XposedBridge.log("XVC: no item dispatch method on ${controller.name}; clicks inert")
+            XposedBridge.log("XVC: no click dispatch u(int) found; clicks inert")
             return
         }
-        DiagLog.line("hooked ${candidates.size} dispatch method(s)")
-        for (m in candidates) {
-            m.isAccessible = true
-            XposedBridge.hookMethod(m, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val arg = param.args.getOrNull(0) ?: return
-                    if (!isOurEntry(arg)) return
-                    DiagLog.line("download entry tapped")
+        DiagLog.line("hooked click dispatch ${dispatch.declaringClass.name}.${dispatch.name}(int)")
+
+        XposedBridge.hookMethod(dispatch, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                val actionId = param.args.getOrNull(0) as? Int ?: return
+                // Cheapest possible check on a host-wide dispatch path: one int compare.
+                if (actionId != sentinelActionId) return
+                DiagLog.line("download entry tapped")
+                runCatching {
+                    // The hooked object is the dialog fragment, not the controller, so the tweet
+                    // has to come from the controller instance captured when the sheet was shown.
+                    val sheet = shownSheet
+                    if (sheet == null) {
+                        DiagLog.line("ERROR tapped but no sheet was recorded")
+                        return
+                    }
+                    val tweet = tweetOf(sheet)
+                    if (tweet == null) {
+                        DiagLog.line("ERROR tapped but tweet field not found")
+                        return
+                    }
+                    onDownload(hostContext(sheet), tweet)
+                    // Consume it: letting the host continue with an action id it does not
+                    // know can put its own dispatch into a default branch.
+                    param.result = null
+                }.onFailure {
+                    DiagLog.line("ERROR download dispatch failed: $it")
+                    XposedBridge.log("XVC: download dispatch failed: $it")
                     runCatching {
-                        val sheet = param.thisObject
-                        val tweet = tweetOf(sheet)
-                        if (tweet == null) {
-                            DiagLog.line("ERROR tapped but tweet field not found")
-                            return
+                        val ctx = shownSheet?.let { s -> hostContext(s) }
+                        if (ctx != null) {
+                            Toast.makeText(
+                                ctx,
+                                moduleResources.failureLabel(ctx),
+                                Toast.LENGTH_SHORT,
+                            ).show()
                         }
-                        onDownload(hostContext(sheet), tweet)
-                        // Consume it: letting the host continue with an action id it does not
-                        // know can put its own dispatch into a default branch.
-                        param.result = null
-                    }.onFailure {
-                        DiagLog.line("ERROR download dispatch failed: $it")
-                        XposedBridge.log("XVC: download dispatch failed: $it")
-                        Toast.makeText(
-                            hostContext(sheet = param.thisObject),
-                            moduleResources.failureLabel(hostContext(param.thisObject)),
-                            Toast.LENGTH_SHORT,
-                        ).show()
                     }
                 }
-            })
-        }
+            }
+        })
     }
 
     /** True when [candidate] is the entry this module injected, identified by the sentinel id. */

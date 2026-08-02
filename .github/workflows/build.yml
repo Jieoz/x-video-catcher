@@ -214,7 +214,7 @@ jobs:
           # trusted. Shipping without them is how 12.13.0-release.0 broke: the recorded
           # controller name loaded a real-but-unrelated class, so the module reported success
           # and then found no show method on it.
-          check HostResolver shareSheetController,actionSheetItem,showMethodOf,listField,tweetField,entryConstructor
+          check HostResolver shareSheetController,actionSheetItem,showMethodOf,listField,tweetField,entryConstructor,clickDispatch,clickContract
 
       # The checker must be able to fail. A tool that reports success unconditionally is
       # indistinguishable from a passing gate, and this one has already been wrong once

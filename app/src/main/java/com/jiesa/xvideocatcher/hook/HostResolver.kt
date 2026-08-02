@@ -171,8 +171,104 @@ internal object HostResolver {
         }
     }
 
+    /**
+     * The method a sheet click is dispatched through.
+     *
+     * Verified against 12.13.0-release.0 by reading the dex: the controller declares **no** method
+     * taking the item class, so looking for one there can never succeed (that was the
+     * `no item dispatch method` failure). The sheet is a RecyclerView whose ViewHolder holds a
+     * `com.twitter.app.common.dialog.o` and dispatches through `o.u(int)`, where the int is the
+     * action id. `BaseDialogFragment` implements it and none of its 10 subclasses override it, so
+     * a single hook on the declaring class covers every sheet.
+     *
+     * Located by shape rather than by the name `u`: a one-letter method name is exactly what R8
+     * rewrites. The dialog-fragment class name itself is not obfuscated (it is a Fragment the host
+     * instantiates by name), so it is a safe anchor; the *method* is then found by signature.
+     */
+    fun clickDispatch(classLoader: ClassLoader): Method? {
+        val cls = runCatching { classLoader.loadClass(DIALOG_FRAGMENT) }.getOrNull()
+        if (cls == null) {
+            DiagLog.line("click dispatch: $DIALOG_FRAGMENT not found")
+            return null
+        }
+
+        // "The only void(int)" is NOT a valid selector: this class declares two (`u` and `R0` on
+        // the verified build), so a uniqueness check here would refuse on every build.
+        //
+        // The durable discriminator is the interface. The click contract is one of the fragment's
+        // interfaces — resolved by shape, below — and R8 must rename an interface method and its
+        // implementations together, so the interface's void(int) name IS the right method name on
+        // the fragment, whatever R8 called it this build.
+        val contract = clickContract(cls)
+        if (contract == null) {
+            DiagLog.line("click dispatch: no click-contract interface on ${cls.name}")
+            return null
+        }
+        val name = contract.declaredMethods.firstOrNull { m ->
+            m.returnType == Void.TYPE &&
+                m.parameterTypes.size == 1 &&
+                m.parameterTypes[0] == Int::class.javaPrimitiveType
+        }?.name
+        if (name == null) {
+            DiagLog.line("click dispatch: ${contract.name} has no void(int)")
+            return null
+        }
+
+        val m = runCatching {
+            cls.getDeclaredMethod(name, Int::class.javaPrimitiveType)
+        }.getOrNull()
+        if (m == null) {
+            DiagLog.line("click dispatch: ${cls.name} does not declare $name(int)")
+            return null
+        }
+        return m.also { it.isAccessible = true }
+    }
+
+    /**
+     * The dialog's click-callback interface, identified by shape.
+     *
+     * Shape on the verified build: no fields, exactly 5 methods — one `void()`, one
+     * `void(boolean)`, one `void(int)` and two no-arg methods returning the same Rx type. Measured
+     * unique across all 16 dex files, so this does not need the interface's obfuscated name (`o`).
+     */
+    private fun clickContract(fragment: Class<*>): Class<*>? {
+        val candidates = fragment.interfaces.filter { i ->
+            if (i.declaredFields.isNotEmpty()) return@filter false
+            val ms = i.declaredMethods
+            if (ms.size != CONTRACT_METHOD_COUNT) return@filter false
+
+            val voidInt = ms.count {
+                it.returnType == Void.TYPE && it.parameterTypes.size == 1 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType
+            }
+            val voidBool = ms.count {
+                it.returnType == Void.TYPE && it.parameterTypes.size == 1 &&
+                    it.parameterTypes[0] == Boolean::class.javaPrimitiveType
+            }
+            val voidNoArg = ms.count { it.returnType == Void.TYPE && it.parameterTypes.isEmpty() }
+            // Two no-arg methods returning one common non-void type.
+            val noArgReturns = ms.filter { it.parameterTypes.isEmpty() && it.returnType != Void.TYPE }
+                .map { it.returnType }
+            val twoSameReturns = noArgReturns.size == 2 && noArgReturns.distinct().size == 1
+
+            voidInt == 1 && voidBool == 1 && voidNoArg == 1 && twoSameReturns
+        }
+        if (candidates.size != 1) {
+            DiagLog.line("click contract: ${candidates.size} matching interface(s) on ${fragment.name}")
+            return null
+        }
+        return candidates[0]
+    }
+
+    /** Test seam for [clickContract]; the shape match is worth asserting on its own. */
+    internal fun clickContractForTest(fragment: Class<*>): Class<*>? = clickContract(fragment)
+
     private fun packageOf(className: String) = className.substringBeforeLast('.')
 
     private const val FRAGMENT_MANAGER = "androidx.fragment.app.FragmentManager"
+    private const val DIALOG_FRAGMENT = "com.twitter.app.common.dialog.BaseDialogFragment"
+
+    /** Method count of the click-contract interface on the verified build. */
+    private const val CONTRACT_METHOD_COUNT = 5
     private const val TWEET_MODEL_PACKAGE = "com.twitter.model.core."
 }
