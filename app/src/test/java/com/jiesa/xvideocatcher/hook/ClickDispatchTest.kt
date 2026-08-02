@@ -84,12 +84,12 @@ class ClickDispatchTest {
     fun `interface without the contract shape is refused`() {
         // NoContractFragment implements an interface of the wrong shape, so no dispatch should be
         // resolved even though the class itself has a void(int).
-        assertNull(HostResolver.clickContractForTest(NoContractFragment::class.java))
+        assertNull(HostResolver.clickContractOf(NoContractFragment::class.java))
     }
 
     @Test
     fun `contract shape is matched on the real fixture`() {
-        val c = HostResolver.clickContractForTest(BaseDialogFragment::class.java)
+        val c = HostResolver.clickContractOf(BaseDialogFragment::class.java)
         assertEquals(ClickContract::class.java, c)
     }
 

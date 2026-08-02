@@ -50,25 +50,20 @@ internal object HostClasses {
     const val ACTION_SHEET_ITEM = "com.twitter.ui.dialog.actionsheet.b"
 
     /**
-     * Share-sheet controller. Holds the item list that gets rendered, and the tweet the sheet
-     * was opened for.
+     * The one host name used verbatim, and the only one that can be.
      *
-     * Shape, identical in both builds examined and what [HostResolver] matches on:
+     * X instantiates this fragment by name, so R8 has to keep it. Every other class the injector
+     * needs is reached *from* here by shape — the click-contract interface, the bind method, the
+     * sheet model — which is why no controller name appears in this file any more.
      *
-     *  - exactly one `java.util.List` instance field — the entries shown in the sheet
-     *  - one field typed into `com.twitter.model.core` — the tweet the sheet was opened for
-     *  - a `void` method taking exactly one `FragmentManager` — shows the sheet
-     *
-     * That combination is unique app-wide: of the two classes in 12.13.0-release.0 declaring
-     * `void(FragmentManager)` plus a `List`, the other is `BaseConversationActionsDialog`, which
-     * has no `com.twitter.model.core` field. The show method's *name* is not recorded, because it
-     * is found by signature; only the package is load-bearing here.
-     *
-     * Candidate name is from beta; release resolves to `…legacy.e0` at runtime.
+     * Deleted along with the controller path: `SHARE_SHEET_CONTROLLER`, `SHARE_SHEET_ITEMS_FIELD`
+     * and `SHARE_SHEET_TWEET_FIELD`. Versions 1.2 and 1.3 hooked that controller
+     * (`com.twitter.tweet.action.legacy.e0`) and its `show(FragmentManager)`; device logs showed
+     * both hooks installing and never firing, because that class drives the **tweet action sheet**
+     * and not the share panel the user actually opens. Keeping the constants around as a fallback
+     * would only preserve a path proven not to reach the target.
      */
-    const val SHARE_SHEET_CONTROLLER = "com.twitter.tweet.action.legacy.h0"
-    const val SHARE_SHEET_ITEMS_FIELD = "a"
-    const val SHARE_SHEET_TWEET_FIELD = "b"
+    const val DIALOG_FRAGMENT = "com.twitter.app.common.dialog.BaseDialogFragment"
 
     /** Tweet wrapper (`Parcelable`). Field `a` is the tweet body, field `c` a nested quote. */
     const val TWEET_WRAPPER = "com.twitter.model.core.e"

@@ -1,100 +1,139 @@
 package com.jiesa.xvideocatcher.hook
 
 import com.jiesa.xvideocatcher.DiagLog
+import java.lang.reflect.Constructor
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 
 /**
- * Resolves the host's share-sheet classes by structure, verifying every candidate before use.
+ * Resolves the host's action-sheet plumbing by structure, verifying every candidate before use.
  *
- * Why this exists: [HostClasses.SHARE_SHEET_CONTROLLER] was read out of X 12.13.0-beta.0, where
- * the controller compiled to `com.twitter.tweet.action.legacy.h0`. In 12.13.0-release.0 the same
- * class is `e0`, and `h0` is a *different, unrelated* class that also exists. `loadClass("…h0")`
- * therefore succeeded and the module reported "controller resolved", then failed to find the show
- * method on it — one wrong class name produced two misleading FATAL lines and no download entry.
+ * ## Why the controller path was deleted
  *
- * The fix is to stop trusting any obfuscated name on its own. A name is only ever a candidate
- * here; it is accepted only if the class carries the controller's shape:
+ * Versions 1.2 and 1.3 hooked a *controller* (`com.twitter.tweet.action.legacy.e0`) and its
+ * `show(FragmentManager)` method. Device logs proved both hooks installed and then nothing fired
+ * when the share panel opened: that controller drives the **tweet action sheet**, a different
+ * surface from the share panel. Chasing a third controller name would have repeated the mistake,
+ * so the anchor moved to the place every sheet must pass through.
  *
- *  - a `void` method taking exactly one `FragmentManager` (shows the sheet)
- *  - a `java.util.List` instance field (the rendered entries)
- *  - a field typed to the tweet wrapper (the tweet the sheet was opened for)
+ * ## The choke point
  *
- * Verified against the real 12.13.0-release.0 APK: exactly two classes in the whole app declare
- * `void(FragmentManager)` plus a `List` field, and the other is `BaseConversationActionsDialog`
- * (3 fields, unobfuscated name, not in a tweet-action package). Requiring the tweet-wrapper field
- * as well leaves the controller unique.
+ * A sheet is rendered by a ViewHolder method `void bind(sheetModel, clickContract)`, verified on
+ * 12.13.0-release.0 as `n0(actionsheet.h, dialog.o)`. It receives the item list holder *and* the
+ * tap callback, which is everything an injection needs, and it cannot be bypassed: no bind, no
+ * visible sheet.
  *
- * Search order is cheapest-first, so the common case costs one `loadClass`:
- *  1. the recorded name, structurally verified
- *  2. sibling names in the same package (`a`..`z`, `a0`..`z9`) — R8 keeps packages, so the class
- *     moves within its package rather than out of it
- *  3. give up and log why, leaving X untouched
+ * Two classes declare it, and **both must be hooked**. `com.twitter.app.share.ui.d` (the share
+ * panel) extends the base ViewHolder and overrides the method with **no `invoke-super`** — read off
+ * the bytecode with a disassembler, not inferred — so a base-class-only hook is exactly the bug
+ * 1.3.0 shipped.
+ *
+ * ## Anchoring rules
+ *
+ * No obfuscated name is trusted. `com.twitter.app.common.dialog.BaseDialogFragment` is the one
+ * name used verbatim, and only because the host instantiates it by name so R8 must keep it. From
+ * there:
+ *
+ *  - the **click contract** is the fragment's interface with the contract shape (5 methods),
+ *    measured unique across all 16 dex files;
+ *  - the **bind points** are methods `void(X, contract)` where `X` holds a `List`;
+ *  - the **sheet model** is `X` above — its `List` field is where an entry is appended;
+ *  - the **tweet link** is the constructor receiving both a sheet model and a `com.twitter.share.*`
+ *    object; that object carries the tweet, and taking both in one constructor associates panel
+ *    with tweet exactly, with no timing guesswork.
+ *
+ * Package names survive R8 in this app, so short obfuscated class names are searched within their
+ * recorded package (`a`..`z`, `a0`..`z9`) and accepted only on shape.
  */
 internal object HostResolver {
 
-    /** Result of a successful controller resolution. */
-    internal data class Controller(
-        val cls: Class<*>,
-        val showMethod: Method,
+    /** A verified render path: the bind method plus the sheet-model type it accepts. */
+    internal data class BindPoint(
+        val method: Method,
+        val sheetModel: Class<*>,
     )
 
     /**
-     * Finds the share-sheet controller, or null.
+     * Every class that binds a sheet, as [BindPoint]s.
      *
-     * Never throws: a miss must degrade to "no download entry", never to an exception inside X.
+     * Returns *all* matches rather than a unique one. An override that does not call `super`
+     * renders its own sheet, so each declaring class is a separate entry point; hooking one and
+     * assuming coverage is what made the share panel inert.
      */
-    fun shareSheetController(classLoader: ClassLoader): Controller? {
-        val tried = mutableListOf<String>()
+    fun bindPoints(classLoader: ClassLoader): List<BindPoint> {
+        val contract = clickContract(classLoader) ?: return emptyList()
+        val found = mutableListOf<BindPoint>()
+        val seen = mutableSetOf<String>()
 
-        for (name in candidateNames(HostClasses.SHARE_SHEET_CONTROLLER)) {
-            val cls = runCatching { classLoader.loadClass(name) }.getOrNull() ?: continue
-            val show = showMethodOf(cls)
-            if (show == null) {
-                tried.add("$name(no-show)")
-                continue
+        for (pkg in BIND_PACKAGES) {
+            for (name in candidatesIn(pkg)) {
+                val cls = runCatching { classLoader.loadClass(name) }.getOrNull() ?: continue
+                val methods = cls.declaredMethods.filter { m ->
+                    m.returnType == Void.TYPE &&
+                        !Modifier.isStatic(m.modifiers) &&
+                        m.parameterTypes.size == 2 &&
+                        m.parameterTypes[1] == contract &&
+                        listFieldOf(m.parameterTypes[0]) != null
+                }
+                for (m in methods) {
+                    if (seen.add("${cls.name}.${m.name}")) {
+                        m.isAccessible = true
+                        found.add(BindPoint(m, m.parameterTypes[0]))
+                    }
+                }
             }
-            if (listField(cls) == null) {
-                tried.add("$name(no-list)")
-                continue
-            }
-            if (tweetField(cls) == null) {
-                tried.add("$name(no-tweet)")
-                continue
-            }
-            if (name != HostClasses.SHARE_SHEET_CONTROLLER) {
-                DiagLog.line(
-                    "controller drifted: recorded ${HostClasses.SHARE_SHEET_CONTROLLER} " +
-                        "is not it; resolved $name by shape"
-                )
-            }
-            return Controller(cls, show)
         }
 
-        DiagLog.line("FATAL no class in ${packageOf(HostClasses.SHARE_SHEET_CONTROLLER)} has the")
-        DiagLog.line("      controller shape (void(FragmentManager) + List + tweet field).")
-        DiagLog.line("      rejected: ${tried.take(12).joinToString(", ")}")
-        return null
+        if (found.isEmpty()) {
+            DiagLog.line("FATAL no bind method void(sheetModel, ${contract.simpleName}) found")
+            DiagLog.line("      searched: ${BIND_PACKAGES.joinToString(", ")}")
+        }
+        return found
     }
 
     /**
-     * The item-model class (`ActionSheetItem`), verified by its constructor shape.
+     * Constructors that associate a sheet model with the object carrying its tweet.
      *
-     * Identified by the `(int drawableRes, int actionId, String title)` constructor, which is the
-     * one the module uses to build an entry. Confirmed still present and unique within
-     * `com.twitter.ui.dialog.actionsheet` in 12.13.0-release.0.
+     * Verified unique on 12.13.0-release.0: `menu.share.full.providers.l` takes
+     * `(share.api.e, actionsheet.h, …)`. The declared parameter type is the shareable *base*, which
+     * has no tweet field — the tweet lives on the subclass actually passed at runtime — so the
+     * tweet is read off the instance later, by [tweetFieldIn], rather than checked here.
+     */
+    fun sheetLinks(classLoader: ClassLoader, sheetModel: Class<*>): List<Constructor<*>> {
+        val found = mutableListOf<Constructor<*>>()
+        for (pkg in LINK_PACKAGES) {
+            for (name in candidatesIn(pkg)) {
+                val cls = runCatching { classLoader.loadClass(name) }.getOrNull() ?: continue
+                for (c in cls.declaredConstructors) {
+                    val p = c.parameterTypes
+                    if (p.size < 2) continue
+                    if (!p.any { it == sheetModel }) continue
+                    if (!p.any { it.name.startsWith(SHARE_PACKAGE) }) continue
+                    c.isAccessible = true
+                    found.add(c)
+                }
+            }
+        }
+        if (found.isEmpty()) {
+            DiagLog.line("sheet link: no ctor takes (${sheetModel.simpleName}, ${SHARE_PACKAGE}*)")
+        }
+        return found
+    }
+
+    /**
+     * The item-model class, verified by its `(int drawableRes, int actionId, String title)`
+     * constructor — the shape the module builds an entry with.
      */
     fun actionSheetItem(classLoader: ClassLoader): Class<*>? {
-        for (name in candidateNames(HostClasses.ACTION_SHEET_ITEM)) {
+        val recorded = HostClasses.ACTION_SHEET_ITEM
+        for (name in sequenceOf(recorded) + candidatesIn(packageOf(recorded))) {
             val cls = runCatching { classLoader.loadClass(name) }.getOrNull() ?: continue
             if (entryConstructor(cls) != null) {
-                if (name != HostClasses.ACTION_SHEET_ITEM) {
-                    DiagLog.line("item model drifted: resolved $name by ctor shape")
-                }
+                if (name != recorded) DiagLog.line("item model drifted: resolved $name by ctor shape")
                 return cls
             }
         }
-        DiagLog.line("FATAL no (int,int,String) ctor in ${packageOf(HostClasses.ACTION_SHEET_ITEM)}")
+        DiagLog.line("FATAL no (int,int,String) ctor in ${packageOf(recorded)}")
         return null
     }
 
@@ -108,82 +147,46 @@ internal object HostResolver {
                 p[2] == String::class.java
         }?.also { it.isAccessible = true }
 
-    /** `void m(FragmentManager)` declared on [cls], or null. Name is never consulted. */
-    fun showMethodOf(cls: Class<*>): Method? =
-        cls.declaredMethods.firstOrNull { m ->
-            m.returnType == Void.TYPE &&
-                m.parameterTypes.size == 1 &&
-                m.parameterTypes[0].name == FRAGMENT_MANAGER &&
-                !Modifier.isStatic(m.modifiers)
-        }?.also { it.isAccessible = true }
-
-    /** The controller's entry list: its only `java.util.List` instance field. */
-    fun listField(cls: Class<*>) =
+    /** The sheet model's item list: its only `java.util.List` instance field. */
+    fun listFieldOf(cls: Class<*>) =
         cls.declaredFields
             .filter { !Modifier.isStatic(it.modifiers) && it.type == List::class.java }
             .singleOrNull()
             ?.also { it.isAccessible = true }
 
     /**
-     * The field holding the tweet wrapper.
+     * The field holding a tweet, searched up [start]'s superclass chain.
      *
-     * Matched by package rather than exact class name: the wrapper's own name drifts too, but it
-     * stays in `com.twitter.model.core`. Requiring exactly one match keeps this from latching onto
-     * an unrelated model object.
+     * Walking the chain matters here: the shareable passed to a sheet link is typed as a base class
+     * with no tweet, and the tweet sits on the concrete subclass. Matched by package rather than
+     * class name, since the model's own name drifts but its package does not.
      */
-    fun tweetField(cls: Class<*>) =
-        cls.declaredFields
-            .filter {
+    fun tweetFieldIn(start: Class<*>): java.lang.reflect.Field? {
+        var cls: Class<*>? = start
+        while (cls != null && cls != Any::class.java) {
+            val fields = cls.declaredFields.filter {
                 !Modifier.isStatic(it.modifiers) &&
                     it.type.name.startsWith(TWEET_MODEL_PACKAGE) &&
                     !it.type.isEnum
             }
-            .let { fields ->
-                fields.singleOrNull()
-                    // 12.13 has one; if a build adds a second model field, prefer the one whose
-                    // class declares the most fields — the tweet body is the fat object here.
-                    ?: fields.maxByOrNull { it.type.declaredFields.size }
-            }
-            ?.also { it.isAccessible = true }
-
-    /**
-     * Candidate names for a recorded class: the record itself, then its siblings.
-     *
-     * R8 renames classes within their package, so a drifted controller is still in
-     * `com.twitter.tweet.action.legacy`. The sibling space is generated in the same shape R8 uses
-     * (`a`..`z`, then `a0`..`z9`), recorded name first so the common case is a single hit.
-     */
-    private fun candidateNames(recorded: String): Sequence<String> = sequence {
-        yield(recorded)
-        val pkg = packageOf(recorded)
-        val seen = mutableSetOf(recorded)
-        // Two-char names (a0..z9) first: the recorded names are all in that shape, so a drift
-        // most likely landed on another two-char name.
-        for (c in 'a'..'z') {
-            for (d in '0'..'9') {
-                val n = "$pkg.$c$d"
-                if (seen.add(n)) yield(n)
-            }
+            val hit = fields.singleOrNull()
+                // If a build adds a second model field, prefer the fat one: the tweet body has far
+                // more fields than an id or an enum-like holder.
+                ?: fields.maxByOrNull { it.type.declaredFields.size }
+            if (hit != null) return hit.also { it.isAccessible = true }
+            cls = cls.superclass
         }
-        for (c in 'a'..'z') {
-            val n = "$pkg.$c"
-            if (seen.add(n)) yield(n)
-        }
+        return null
     }
 
     /**
-     * The method a sheet click is dispatched through.
+     * The method a sheet tap is dispatched through: the click contract's `void(int)`, where the int
+     * is the action id.
      *
-     * Verified against 12.13.0-release.0 by reading the dex: the controller declares **no** method
-     * taking the item class, so looking for one there can never succeed (that was the
-     * `no item dispatch method` failure). The sheet is a RecyclerView whose ViewHolder holds a
-     * `com.twitter.app.common.dialog.o` and dispatches through `o.u(int)`, where the int is the
-     * action id. `BaseDialogFragment` implements it and none of its 10 subclasses override it, so
-     * a single hook on the declaring class covers every sheet.
-     *
-     * Located by shape rather than by the name `u`: a one-letter method name is exactly what R8
-     * rewrites. The dialog-fragment class name itself is not obfuscated (it is a Fragment the host
-     * instantiates by name), so it is a safe anchor; the *method* is then found by signature.
+     * Read off the *interface*, never off the implementing class. `BaseDialogFragment` declares two
+     * `void(int)` methods on the verified build (`u` and `R0`), so "the only void(int)" would refuse
+     * on every build. R8 must rename an interface method together with its implementations, so the
+     * name found on the interface is the right name on the fragment whatever this build calls it.
      */
     fun clickDispatch(classLoader: ClassLoader): Method? {
         val cls = runCatching { classLoader.loadClass(DIALOG_FRAGMENT) }.getOrNull()
@@ -191,15 +194,7 @@ internal object HostResolver {
             DiagLog.line("click dispatch: $DIALOG_FRAGMENT not found")
             return null
         }
-
-        // "The only void(int)" is NOT a valid selector: this class declares two (`u` and `R0` on
-        // the verified build), so a uniqueness check here would refuse on every build.
-        //
-        // The durable discriminator is the interface. The click contract is one of the fragment's
-        // interfaces — resolved by shape, below — and R8 must rename an interface method and its
-        // implementations together, so the interface's void(int) name IS the right method name on
-        // the fragment, whatever R8 called it this build.
-        val contract = clickContract(cls)
+        val contract = clickContract(classLoader)
         if (contract == null) {
             DiagLog.line("click dispatch: no click-contract interface on ${cls.name}")
             return null
@@ -213,10 +208,7 @@ internal object HostResolver {
             DiagLog.line("click dispatch: ${contract.name} has no void(int)")
             return null
         }
-
-        val m = runCatching {
-            cls.getDeclaredMethod(name, Int::class.javaPrimitiveType)
-        }.getOrNull()
+        val m = runCatching { cls.getDeclaredMethod(name, Int::class.javaPrimitiveType) }.getOrNull()
         if (m == null) {
             DiagLog.line("click dispatch: ${cls.name} does not declare $name(int)")
             return null
@@ -227,11 +219,21 @@ internal object HostResolver {
     /**
      * The dialog's click-callback interface, identified by shape.
      *
-     * Shape on the verified build: no fields, exactly 5 methods — one `void()`, one
-     * `void(boolean)`, one `void(int)` and two no-arg methods returning the same Rx type. Measured
-     * unique across all 16 dex files, so this does not need the interface's obfuscated name (`o`).
+     * Shape on the verified build: no fields, exactly 5 methods — one `void()`, one `void(boolean)`,
+     * one `void(int)`, and two no-arg methods returning the same non-void type. Measured unique
+     * across all 16 dex files, so the interface's obfuscated name is never needed.
      */
-    private fun clickContract(fragment: Class<*>): Class<*>? {
+    fun clickContract(classLoader: ClassLoader): Class<*>? {
+        val fragment = runCatching { classLoader.loadClass(DIALOG_FRAGMENT) }.getOrNull()
+        if (fragment == null) {
+            DiagLog.line("click contract: $DIALOG_FRAGMENT not found")
+            return null
+        }
+        return clickContractOf(fragment)
+    }
+
+    /** Shape match for the click contract, split out so it can be asserted on directly. */
+    internal fun clickContractOf(fragment: Class<*>): Class<*>? {
         val candidates = fragment.interfaces.filter { i ->
             if (i.declaredFields.isNotEmpty()) return@filter false
             val ms = i.declaredMethods
@@ -246,8 +248,8 @@ internal object HostResolver {
                     it.parameterTypes[0] == Boolean::class.javaPrimitiveType
             }
             val voidNoArg = ms.count { it.returnType == Void.TYPE && it.parameterTypes.isEmpty() }
-            // Two no-arg methods returning one common non-void type.
-            val noArgReturns = ms.filter { it.parameterTypes.isEmpty() && it.returnType != Void.TYPE }
+            val noArgReturns = ms
+                .filter { it.parameterTypes.isEmpty() && it.returnType != Void.TYPE }
                 .map { it.returnType }
             val twoSameReturns = noArgReturns.size == 2 && noArgReturns.distinct().size == 1
 
@@ -260,13 +262,35 @@ internal object HostResolver {
         return candidates[0]
     }
 
-    /** Test seam for [clickContract]; the shape match is worth asserting on its own. */
-    internal fun clickContractForTest(fragment: Class<*>): Class<*>? = clickContract(fragment)
+    /**
+     * Obfuscated-name candidates inside a package.
+     *
+     * R8 renames a class within its package rather than moving it out, so a drifted class is still
+     * findable this way. Two-character names come first because every recorded name has that shape.
+     */
+    private fun candidatesIn(pkg: String): Sequence<String> = sequence {
+        for (c in 'a'..'z') for (d in '0'..'9') yield("$pkg.$c$d")
+        for (c in 'a'..'z') yield("$pkg.$c")
+    }
 
     private fun packageOf(className: String) = className.substringBeforeLast('.')
 
-    private const val FRAGMENT_MANAGER = "androidx.fragment.app.FragmentManager"
-    private const val DIALOG_FRAGMENT = "com.twitter.app.common.dialog.BaseDialogFragment"
+    private val DIALOG_FRAGMENT get() = HostClasses.DIALOG_FRAGMENT
+
+    /** Packages declaring a bind method: the base ViewHolder's, and the share panel's override. */
+    private val BIND_PACKAGES = listOf(
+        "com.twitter.ui.dialog.actionsheet",
+        "com.twitter.app.share.ui",
+        "com.twitter.subsystems.nudges.engagements",
+    )
+
+    /** Packages where a sheet model is handed its tweet-carrying shareable. */
+    private val LINK_PACKAGES = listOf(
+        "com.twitter.menu.share.full.providers",
+        "com.twitter.menu.share.half",
+    )
+
+    private const val SHARE_PACKAGE = "com.twitter.share."
 
     /** Method count of the click-contract interface on the verified build. */
     private const val CONTRACT_METHOD_COUNT = 5
