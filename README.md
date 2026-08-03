@@ -8,6 +8,18 @@ Everything runs inside X's process. There is no activity, no service, no backgro
 no launcher icon — the APK exists only to be loaded into X by LSPosed. Installing it and opening
 it does nothing by design; the entry appears in X.
 
+> ### 1.5.0-probe adds no entry, on purpose
+>
+> **The current build is diagnostic. It watches the share sheet and changes nothing in it, so there
+> is no download entry to look for and no download to trigger.** What it does instead is record what
+> X actually does, to the log described under Reading the log.
+>
+> Versions 1.2, 1.3 and 1.4 each resolved their anchors, installed their hooks, logged success, and
+> then did nothing on the device. Those anchors were real classes of the right shape with **zero call
+> sites** in the shipped app. No static check catches that, because dead code has the correct shape.
+> `tools/verify_host_anchors.py` now proves reachability against the host APK, and injection returns
+> once a device confirms these anchors sit on the path a tap really takes.
+
 ## Target
 
 | Item | Value |
@@ -29,9 +41,14 @@ Four pieces, in the order they run:
 | Class | Job |
 | --- | --- |
 | `XVideoCatcherModule` | entry point; installs hooks once a host `Application` context exists |
-| `ShareSheetInjector` | appends the entry to the sheet's item list, catches the tap |
+| `SharePathProbe` | 1.5.0: observes sheet open, row list and tap dispatch; adds nothing to the UI |
 | `TweetMedia` | walks the live tweet object graph, picks the best rendition per item |
 | `HostDownloader` | fetches on a small pool, saves via MediaStore, reports by toast |
+
+`SharePathProbe` replaced `ShareSheetInjector`, which targeted the action-sheet family the
+reachability gate has since shown to be dead. `TweetMedia` and `HostDownloader` are unchanged and
+still gated by CI: the probe deliberately runs the *production* extractor rather than a probe-local
+copy, so a probe that reports media cannot mean something different from a build that downloads it.
 
 Hooks are installed from `Application.attach`, not at package load. `HostShapes` resolves host
 fields by loading host classes, and doing that before the host classloader is fully set up returns
@@ -178,8 +195,9 @@ unit tests caught neither the `name=orig` 404 nor the webp downgrade — both ne
 2. Force-stop X so it restarts with the module attached.
 3. Open a post with video or photos, tap share.
 
-The **下载视频** entry appears in the share sheet. Nothing happens when you open the module itself —
-it has no UI.
+**1.5.0-probe changes nothing you can see.** No entry appears in the sheet; that is the expected
+result, not a failure. Open a video post's share sheet, tap any row, then read the log below — that
+is the whole test. Nothing happens when you open the module itself either; it has no UI.
 
 ## Diagnosing it from the phone
 
@@ -205,17 +223,25 @@ The log answers the questions worth asking, in order:
 | Nothing at all, no file | Module never loaded — not enabled in LSPosed, scope missing, or X not force-stopped |
 | `=== module attached ===` | Hook is live; the line after it gives module and host versions |
 | `NOTE host version differs…` | X updated past the build these anchors came from — first thing to suspect |
-| `FATAL share sheet controller not found` | X moved or renamed the sheet; needs new anchors |
-| `sheet opened: no downloadable media found` | Post has nothing to download (expected on text-only posts) |
-| `ENTRY SKIPPED: …` | Sheet was found but the entry could not be added — the message names which step |
-| `entry added to sheet` | Entry is there; if you don't see it, the problem is rendering, not injection |
-| `download entry tapped` | The tap reached this module |
-| `FAILED <file>: <reason>` | Per-item download failure with its cause |
-| `download finished: saved=N…` | Outcome counts for the batch |
+| `PROBE resolve …=MISS` | That anchor was not found at all. Names which one, so it is actionable |
+| `PROBE resolve dispatch=0 point(s)` | Tap dispatch has no anchor; a tap could never be caught |
+| **`PROBE sheet opened via …`** | **The key line.** The panel reached this module. Absent after opening a sheet ⇒ wrong anchor, full stop — this is what 1.2–1.4 could not tell us |
+| `PROBE   subject=…` | The share subject's class, followed by whether the tweet hangs off it |
+| `PROBE   tweet field …` / `no tweet-model field` | Whether media is reachable from the subject. On a miss, every field is dumped so the next step needs no second trip to the device |
+| `PROBE   media extracted: N item(s)` | The production extractor ran and found media — downloading would have worked |
+| `PROBE rows built: N row(s)` | The row list was produced, with its size and contents |
+| `PROBE   list mutable=true` | The list tolerates an append, so injection has a viable insertion point |
+| `PROBE action …` | A tap was dispatched and reached this module, naming the row chosen |
+| `ERROR probe … failed: …` | A probe hook threw. It is caught, because a throw inside a host callback surfaces as X crashing |
 
-Each of those `ENTRY SKIPPED` messages used to be a silent `return`. Five different causes produced
-one identical symptom — a share sheet with no download entry — and none of them said anything. That
-was the actual defect: not the missing feature, but that the failure was unreportable.
+The three bold-path markers matter more than their contents. Earlier diagnosis was ambiguous because
+"the hook never fired" and "the log never landed" both presented as an absence — identical evidence
+for opposite causes. Every hook here logs on entry, before any condition, so `sheet opened`,
+`rows built` and `action` separate them: a missing marker now names which stage was never reached.
+
+The previous release's `ENTRY SKIPPED` lines came from the same lesson. Five causes produced one
+symptom — a sheet with no download entry — and none said anything. That was the real defect: not the
+missing feature, but that its failure was unreportable.
 
 Records are queued and written by a low-priority daemon thread, and the queue is flushed once at
 attach so the file proves attachment before you touch anything. Records that cannot be written stay
