@@ -124,6 +124,44 @@ class Dex:
 
     # ---- class defs --------------------------------------------------------
 
+    def code_methods(self):
+        """Yields ``(owner_type, method_name, code_off)`` for every method carrying bytecode.
+
+        [classes] deliberately drops code offsets — it answers "what shape is this class" and nothing
+        more. Reachability needs the instruction stream, so this exposes the offsets from the same
+        walk rather than a second parser: two dex readers drifting apart is how a scan silently starts
+        answering a different question than the shape check it is supposed to back up.
+        """
+        for i in range(self.class_defs_size):
+            (
+                class_idx, _flags, _super, _ifaces,
+                _src, _annos, class_data_off, _statics,
+            ) = struct.unpack_from("<8I", self.raw, self.class_defs_off + i * 32)
+            if not class_data_off:
+                continue
+            owner = self.type_(class_idx)
+            off = class_data_off
+            n_static, off = read_uleb128(self.raw, off)
+            n_inst, off = read_uleb128(self.raw, off)
+            n_direct, off = read_uleb128(self.raw, off)
+            n_virtual, off = read_uleb128(self.raw, off)
+
+            for count in (n_static, n_inst):
+                for _ in range(count):
+                    _, off = read_uleb128(self.raw, off)   # field_idx_diff
+                    _, off = read_uleb128(self.raw, off)   # access_flags
+
+            for count in (n_direct, n_virtual):
+                idx = 0
+                for _ in range(count):
+                    delta, off = read_uleb128(self.raw, off)
+                    _access, off = read_uleb128(self.raw, off)
+                    code_off, off = read_uleb128(self.raw, off)
+                    idx += delta
+                    if code_off:
+                        _owner, mname, _ret, _params = self.method_id(idx)
+                        yield owner, mname, code_off
+
     def classes(self):
         """Yields one dict per class_def: name, super, interfaces, fields, methods."""
         for i in range(self.class_defs_size):

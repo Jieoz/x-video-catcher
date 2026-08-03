@@ -246,6 +246,15 @@ jobs:
           set -euo pipefail
           python3 "$GITHUB_WORKSPACE/tools/verify_host_anchors.py" --self-test
 
+      # The self-test passing does not prove the reachability checks are what produce the verdict.
+      # This ablates each axis and asserts the expected case flips: without it, the gate could pass
+      # while silently deciding nothing -- which is how an exact-declaring-class check reported two
+      # live overrides as dead code and still showed a green suite.
+      - name: Prove the reachability axes are load-bearing
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/tools/ablate_reachability.py"
+
       - name: Verify anchors against a host APK
         if: hashFiles('host/**/*.apk') != ''
         run: |
