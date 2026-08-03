@@ -2,6 +2,7 @@ package com.jiesa.xvideocatcher
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -127,5 +128,55 @@ class DiagLogTest {
     @Test
     fun `advertised path is the sink path`() {
         assertTrue(DiagLog.path().startsWith("Download/${DiagSink.DIR_NAME}/"))
+    }
+
+    @Test
+    fun `concurrent drains must not write the same record twice`() {
+        // Real defect, observed on device in 1.6.0-probe: xvc-diag-20260804.txt contains 55 extra
+        // lines, including `PROBE rows built` three times at an identical millisecond timestamp.
+        //
+        // flushNow() and the drain thread each snapshot the queue and then write OUTSIDE the lock,
+        // so both can hold the same batch at once, write it, and only then remove it. The log stops
+        // being a faithful record of what the hook did, which is the only thing it exists for.
+        DiagLog.setSessionTag("t")
+        DiagLog.bindForTest()
+
+        val entered = java.util.concurrent.CountDownLatch(2)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val writes = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+        // Barrier writer: forces both drains to be in flight simultaneously. Without this the first
+        // writer usually finishes before the second snapshots, and an unsynchronised implementation
+        // passes anyway.
+        DiagLog.writer = { lines ->
+            writes.addAll(lines)
+            entered.countDown()
+            release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            true
+        }
+
+        DiagLog.line("only-once")
+
+        val a = Thread { DiagLog.flushNow() }
+        val b = Thread { DiagLog.flushNow() }
+        a.start()
+        b.start()
+
+        // If drains are serialised, only one writer can be inside the seam; the second must wait for
+        // the first to finish, so this times out and the barrier never traps two at once.
+        val bothInside = entered.await(2, java.util.concurrent.TimeUnit.SECONDS)
+        release.countDown()
+        a.join(5_000)
+        b.join(5_000)
+
+        assertFalse(
+            "two drains wrote concurrently: the same batch can be persisted twice",
+            bothInside,
+        )
+        assertEquals(
+            "record was written ${writes.count { it.contains("only-once") }} times, expected once",
+            1,
+            writes.count { it.contains("only-once") },
+        )
     }
 }

@@ -27,6 +27,17 @@ object DiagLog {
 
     private val queue = ArrayDeque<String>()
     private val lock = Object()
+
+    /**
+     * Serialises draining. Distinct from [lock], which only guards the queue itself.
+     *
+     * A drain is snapshot-write-remove, and the write must happen outside [lock] so that
+     * [line] never blocks on a file write. That makes the sequence check-then-act: without this
+     * mutex, [flushNow] and [drainLoop] can hold the same batch at once, both persist it, and only
+     * then remove it - producing duplicate records. Observed on device in 1.6.0-probe, where
+     * `PROBE rows built` appears three times at one identical millisecond.
+     */
+    private val drainLock = Object()
     private val stamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
     @Volatile
@@ -108,18 +119,10 @@ object DiagLog {
 
     private fun drainLoop() {
         while (true) {
-            val batch: List<String>
             synchronized(lock) {
                 while (queue.isEmpty()) lock.wait()
-                batch = queue.toList()
             }
-            val ok = bound && writer(batch)
-            synchronized(lock) {
-                if (ok) {
-                    // Remove exactly what was written. Anything queued meanwhile stays.
-                    repeat(batch.size) { queue.pollFirst() }
-                }
-            }
+            val ok = drainOnce()
             if (!ok) {
                 // Retry rather than drop, but back off: a permanently failing sink must not spin.
                 Thread.sleep(5_000)
@@ -131,15 +134,28 @@ object DiagLog {
 
     /** Blocks briefly until the queue drains, so attach-time evidence lands immediately. */
     fun flushNow() {
-        if (!bound) return
+        drainOnce()
+    }
+
+    /**
+     * Writes at most one batch, and is the only place that does.
+     *
+     * Holding [drainLock] across snapshot, write and removal is what makes a record appear exactly
+     * once: two callers cannot both be holding the same batch. Returns whether a write succeeded.
+     */
+    private fun drainOnce(): Boolean = synchronized(drainLock) {
+        if (!bound) return false
         val batch: List<String>
         synchronized(lock) {
-            if (queue.isEmpty()) return
+            if (queue.isEmpty()) return false
             batch = queue.toList()
         }
-        if (writer(batch)) {
+        val ok = writer(batch)
+        if (ok) {
+            // Remove exactly what was written. Anything queued meanwhile stays.
             synchronized(lock) { repeat(batch.size) { queue.pollFirst() } }
         }
+        return ok
     }
 
     /** Where the log is being written, for reporting to the user. */
