@@ -288,20 +288,38 @@ def check_reachability(apk, results, classes=None):
         sites = set()
         for owner in owners:
             sites.update(found.get((owner, method), []))
-        counts[label] = len(sites)
 
-        if not sites:
+        # An invoke-super from inside the anchor's own hierarchy is the override delegating upward; it
+        # cannot be the reason the override is entered. Counting it would let an anchor vouch for its
+        # own reachability: an unreachable override whose only supertype call site is its own
+        # super.m() would read as live.
+        #
+        # The opcode test has to come first and cannot be replaced by "caller is in the hierarchy".
+        # In this host, share.impl.b.h contains an *invoke-interface* to sharesheet.r.h, and b
+        # implements r -- so caller and target are both in one hierarchy while the call is ordinary
+        # delegation to another instance, a genuine entry point that must keep counting. Only the
+        # opcode distinguishes the two.
+        entrances = {s for s in sites
+                     if not (s.is_self_super() and s.caller_class in owners)}
+        counts[label] = len(entrances)
+
+        if not entrances:
+            detail = ""
+            if sites:
+                detail = (" (%d call site(s) exist but all are super calls from within the "
+                          "hierarchy itself)" % len(sites))
             failures.append(
-                "%s has ZERO call sites on %s — it resolves by shape but the host never invokes it. "
-                "This is exactly the 1.2-1.4 failure: hooks install, nothing fires."
-                % (label, " / ".join(pretty(o) for o in owners))
+                "%s has ZERO entry points on %s — it resolves by shape but nothing outside its own "
+                "hierarchy invokes it%s. This is exactly the 1.2-1.4 failure: hooks install, "
+                "nothing fires."
+                % (label, " / ".join(pretty(o) for o in owners), detail)
             )
             continue
 
         # Reached only through a supertype: the concrete class must be constructed, or the virtual
         # call can never land on it.
         if method is not None and owners != [cls_desc]:
-            direct = found.get((cls_desc, method), [])
+            direct = [s for s in found.get((cls_desc, method), []) if not s.is_self_super()]
             if not direct:
                 new_sites = built.get(cls_desc, [])
                 if not new_sites:
@@ -473,10 +491,12 @@ def self_test():
     # dispatch axis -- a suite covering only direct calls is how the override false-positive shipped.
     extra = 0
     reach_cases = [
-        ("dead anchor rejected", "dead", False, "ZERO call sites"),
+        ("dead anchor rejected", "dead", False, "ZERO entry points"),
         ("direct call accepted", "direct", True, None),
         ("override via supertype accepted", "override", True, None),
         ("orphan override rejected", "override_orphan", False, "NEVER instantiated"),
+        ("self-super-only rejected", "self_super_only", False, "ZERO entry points"),
+        ("sibling interface delegation kept", "sibling_interface_delegation", True, None),
     ]
     try:
         fixtures = {kind: _fixture_apk(kind) for _l, kind, _e, _n in reach_cases}
@@ -569,6 +589,44 @@ _FIXTURE_SOURCES = {
         "Caller": "public class Caller {\n"
                   "  public boolean go() { Base b = new Base(); return b.J0(this); }\n"
                   "}\n",
+    },
+    # The override's only call site on its hierarchy is its own super.J0() -- the anchor vouching for
+    # itself. j is even constructed, so instantiation evidence alone waves this through; nothing
+    # outside j ever calls J0, so it cannot fire. Found in the real host: share.impl.b.h's site list
+    # contains "b.h -> sharesheet.r.h", which is b.h calling its own parent.
+    "self_super_only": {
+        "Base": "public class Base {\n"
+                "  public boolean J0(Object o) { return o != null; }\n"
+                "}\n",
+        "j": "public class j extends Base {\n"
+             "  @Override public boolean J0(Object o) { return super.J0(o); }\n"
+             "}\n",
+        "Caller": "public class Caller {\n"
+                  "  public Object go() { return new j(); }\n"
+                  "}\n",
+    },
+    # The mirror of self_super_only, and the reason the exclusion keys on the opcode rather than on
+    # "is the caller in this hierarchy": j implements Iface and calls J0 on a *different* Iface
+    # instance. Caller and target sit in one hierarchy, yet this is ordinary delegation and a real
+    # entry point. This exact shape is live in the host (share.impl.b.h invoke-interface
+    # sharesheet.r.h), so widening the exclusion to any same-hierarchy caller would silently declare
+    # a working dispatch anchor dead.
+    "sibling_interface_delegation": {
+        "Iface": "public interface Iface {\n"
+                 "  boolean J0(Object o);\n"
+                 "}\n",
+        "j": "public class j implements Iface {\n"
+             "  private final Iface next;\n"
+             "  public j(Iface next) { this.next = next; }\n"
+             "  @Override public boolean J0(Object o) { return next.J0(o); }\n"
+             "}\n",
+        # j has to be constructed somewhere or axis B rejects it first and this fixture would test
+        # instantiation rather than the opcode distinction it exists for. The host does construct the
+        # equivalent class: share.impl.b is new-instance'd in share.impl.o.a, and share.impl.c in two
+        # Dagger factories.
+        "Factory": "public class Factory {\n"
+                   "  public Iface make(Iface next) { return new j(next); }\n"
+                   "}\n",
     },
 }
 

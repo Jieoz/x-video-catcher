@@ -15,6 +15,7 @@ Invoke opcodes (all format 35c/3rc, 3 code units, method idx in the 2nd unit):
   0x71 invoke-static    0x72 invoke-interface
   0x74..0x78 the /range variants
 """
+import collections
 import sys
 import struct
 import zipfile
@@ -26,6 +27,36 @@ INVOKE = {0x6E, 0x6F, 0x70, 0x71, 0x72, 0x74, 0x75, 0x76, 0x77, 0x78}
 
 # new-instance vAA, type@BBBB -- format 21c, 2 code units, type idx in the 2nd unit.
 NEW_INSTANCE = 0x22
+
+# invoke-super and its /range form. A super call is the *callee* reaching up into its own parent, so
+# it is never evidence that anything outside the class can enter it.
+INVOKE_SUPER = {0x6F, 0x75}
+
+
+class CallSite(collections.namedtuple(
+        "CallSite", "caller_class caller_method target_class target_method opcode dex")):
+    """One invoke instruction, kept structured rather than pre-formatted.
+
+    An earlier version returned display strings and the reachability gate had to decide "is this a
+    super call from the anchor itself" by parsing them back apart. Formatting is not an interface:
+    the caller identity and the opcode are what the verdict depends on, so they stay as fields.
+    """
+
+    __slots__ = ()
+
+    def is_self_super(self):
+        """True when this is the target's own subclass calling ``super.m()`` up into it.
+
+        Such a call proves only that the override delegates upward; it says nothing about whether
+        anything can reach the override in the first place.
+        """
+        return self.opcode in INVOKE_SUPER
+
+    def __str__(self):
+        return "%s.%s -> %s.%s  [%s]" % (
+            pretty(self.caller_class), self.caller_method,
+            pretty(self.target_class), self.target_method, self.dex,
+        )
 
 
 class ScanError(Exception):
@@ -42,9 +73,17 @@ class InvokeDex(Dex):
 
     def invokes_in(self, code_off):
         """Yield method_ids indices invoked by the code_item at code_off."""
+        for _op, idx in self.invoke_ops_in(code_off):
+            yield idx
+
+    def invoke_ops_in(self, code_off):
+        """Yield ``(opcode, method_ids index)`` for each invoke in the code_item at code_off.
+
+        The opcode matters to callers that must tell invoke-super apart from an ordinary call.
+        """
         for op, idx in self._refs_in(code_off):
             if op in INVOKE:
-                yield idx
+                yield op, idx
 
     def new_instances_in(self, code_off):
         """Yield type_ids indices instantiated by the code_item at code_off."""
@@ -180,14 +219,18 @@ def find_callers(apk, targets, dexes=None, max_errors=0):
                 continue
             for cls, mname, code_off in d.code_methods():
                 try:
-                    for midx in d.invokes_in(code_off):
+                    for op, midx in d.invoke_ops_in(code_off):
                         t = want.get(midx)
                         if t is not None:
                             _, tname, _ = d.method_ref(midx)
-                            out[t].append(
-                                "%s.%s -> %s.%s  [%s]"
-                                % (pretty(cls), mname, pretty(t[0]), tname, entry)
-                            )
+                            out[t].append(CallSite(
+                                caller_class=cls,
+                                caller_method=mname,
+                                target_class=t[0],
+                                target_method=tname,
+                                opcode=op,
+                                dex=entry,
+                            ))
                 except Exception as exc:
                     errors.append("%s %s.%s: %s" % (entry, pretty(cls), mname, exc))
     if len(errors) > max_errors:
