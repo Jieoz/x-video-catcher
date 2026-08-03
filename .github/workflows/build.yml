@@ -202,8 +202,11 @@ jobs:
           check DownloadTarget photoSpec,videoSpec
           check MediaSaver save
           check HostDownloader download
-          check ShareSheetInjector install
           check ModuleStrings downloadLabel,startedLabel,successLabel,failureLabel,noMediaLabel
+          # 1.5.0 ships the probe instead of an injector. Injection is withdrawn until a device
+          # confirms the anchors are on the tap path, so asserting ShareSheetInjector here would
+          # gate on a class this build deliberately does not contain.
+          check SharePathProbe install
           # The diagnostic log is the only way a user can see why the entry did not appear —
           # the module has no UI of its own, so if these are missing the fallback is telling
           # someone to attach a computer and read logcat.
@@ -215,10 +218,12 @@ jobs:
           # loaded a real-but-unrelated class, then a controller that drove the wrong surface
           # entirely, both reporting success and then doing nothing.
           #
-          # bindPoints and sheetLinks are the 1.4.0 anchors and replace the controller lookup:
-          # bindPoints must return BOTH declaring classes, since the share panel overrides the
-          # base ViewHolder without calling super.
-          check HostResolver bindPoints,sheetLinks,actionSheetItem,listFieldOf,tweetFieldIn,entryConstructor,clickDispatch,clickContract
+          # These are the 1.5.0 anchors. The 1.4.0 set (bindPoints, sheetLinks, actionSheetItem,
+          # clickDispatch) named the action-sheet family, which tools/verify_host_anchors.py has
+          # since proven has zero call sites in the shipped app -- the reason three releases hooked
+          # successfully and did nothing. dispatchPoints is the replacement, and is validated
+          # against the host APK by the reachability gate rather than by name.
+          check HostResolver rowClass,rowProvider,actionClass,dispatchPoints,sheetOpen,tweetFieldIn
 
       # The checker must be able to fail. A tool that reports success unconditionally is
       # indistinguishable from a passing gate, and this one has already been wrong once
