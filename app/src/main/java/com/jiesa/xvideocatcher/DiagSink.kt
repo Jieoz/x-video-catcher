@@ -54,16 +54,66 @@ internal object DiagSink {
             it.replace("\r", " ").replace("\n", " ")
         }
 
+    /**
+     * The storage operations the append algorithm needs, so that algorithm can be tested.
+     *
+     * MediaStore is not fakeable in a JVM test — Robolectric has no provider behind
+     * `MediaStore.Downloads` — and the bug that shipped was in the *ordering* of these three
+     * operations, not in the Android calls themselves. Naming them as an interface puts the ordering
+     * under test while [MediaStoreRows] stays a thin adapter with no logic to get wrong.
+     */
+    internal interface Rows {
+        /** Row id for an existing file, or null. */
+        fun find(name: String, relativePath: String): String?
+
+        /** Creates a row and returns its id, or null. */
+        fun create(name: String, relativePath: String): String?
+
+        /** Appends to an existing row. */
+        fun write(rowId: String, payload: String): Boolean
+    }
+
+    /**
+     * Serialises the whole find-or-create-then-write sequence.
+     *
+     * The bug this fixes, from a user's device: the diagnostic log arrived as *two* files,
+     * `xvc-diag-20260803.log` and `xvc-diag-20260803.log (1)`, with one session split between them.
+     * The attach-time `flushNow()` on the host's main thread raced the drainer thread; both found no
+     * existing row, both inserted, and MediaStore de-duplicated by suffixing the display name. The
+     * log looked truncated at exactly the moment it was being read to diagnose something else.
+     *
+     * The lock has to span find *and* create — locking only the write would leave the race intact,
+     * because the race is in the lookup. It is process-wide because this object is the only writer,
+     * and uncontended in the steady state: one draining thread plus a few flushes per session.
+     */
+    private val writeLock = Any()
+
     /** Appends [lines], one per line. Returns false if nothing could be written. */
     fun append(context: Context, lines: List<String>): Boolean {
         if (lines.isEmpty()) return true
-        val payload = payloadOf(lines)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            appendViaMediaStore(context, payload)
+            appendTo(MediaStoreRows(context), payloadOf(lines))
         } else {
-            appendViaFile(payload)
+            synchronized(writeLock) { appendViaFile(payloadOf(lines)) }
         }
     }
+
+    /**
+     * Find-or-create the row, then append to it. The one place this ordering exists.
+     *
+     * The row is looked up every time rather than caching its id: a cached id goes stale when the
+     * host process restarts, silently sending the rest of the day's records nowhere.
+     */
+    internal fun appendTo(rows: Rows, payload: String): Boolean = runCatching {
+        val name = fileName()
+        val relative = "${Environment.DIRECTORY_DOWNLOADS}/$DIR_NAME/"
+        synchronized(writeLock) {
+            val rowId = rows.find(name, relative)
+                ?: rows.create(name, relative)
+                ?: return false
+            rows.write(rowId, payload)
+        }
+    }.getOrDefault(false)
 
     /**
      * The direct-file branch, exposed for tests.
@@ -76,40 +126,49 @@ internal object DiagSink {
      */
     internal fun appendDirectForTest(dir: File, lines: List<String>): Boolean {
         if (lines.isEmpty()) return true
-        return appendInto(dir, payloadOf(lines))
+        // Takes [writeLock], like the production entry point. A test helper that skipped it would
+        // make a concurrency test pass while the shipped path stayed racy.
+        return synchronized(writeLock) { appendInto(dir, payloadOf(lines)) }
     }
 
-    private fun appendViaMediaStore(context: Context, payload: String): Boolean = runCatching {
-        val resolver = context.contentResolver
-        val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        val name = fileName()
-        val relative = "${Environment.DIRECTORY_DOWNLOADS}/$DIR_NAME/"
+    /**
+     * [Rows] backed by MediaStore. A thin adapter by design: the ordering that caused the split-file
+     * bug lives in [appendTo], where it is tested, and nothing here makes a decision.
+     */
+    private class MediaStoreRows(private val context: Context) : Rows {
 
-        // Look the row up every time rather than caching the Uri. A cached one goes stale when
-        // the host process restarts, silently sending the rest of the day's records nowhere.
-        val existing = resolver.query(
-            collection,
-            arrayOf(MediaStore.MediaColumns._ID),
-            "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?",
-            arrayOf(relative, name),
-            null,
-        )?.use { c ->
-            if (c.moveToFirst()) ContentUris.withAppendedId(collection, c.getLong(0)) else null
-        }
+        private val collection =
+            MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
 
-        val uri = existing ?: resolver.insert(
-            collection,
-            ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(MediaStore.MediaColumns.MIME_TYPE, MIME)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, relative)
-            },
-        ) ?: return false
+        override fun find(name: String, relativePath: String): String? = runCatching {
+            context.contentResolver.query(
+                collection,
+                arrayOf(MediaStore.MediaColumns._ID),
+                "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND " +
+                    "${MediaStore.MediaColumns.DISPLAY_NAME}=?",
+                arrayOf(relativePath, name),
+                null,
+            )?.use { c -> if (c.moveToFirst()) c.getLong(0).toString() else null }
+        }.getOrNull()
 
-        // MediaStore has no append mode; "wa" on an existing row is the append path.
-        resolver.openOutputStream(uri, "wa")?.use { it.write(payload.toByteArray()) } ?: return false
-        true
-    }.getOrDefault(false)
+        override fun create(name: String, relativePath: String): String? = runCatching {
+            context.contentResolver.insert(
+                collection,
+                ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                    put(MediaStore.MediaColumns.MIME_TYPE, MIME)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                },
+            )?.let { ContentUris.parseId(it).toString() }
+        }.getOrNull()
+
+        override fun write(rowId: String, payload: String): Boolean = runCatching {
+            val uri = ContentUris.withAppendedId(collection, rowId.toLong())
+            // MediaStore has no append mode; "wa" on an existing row is the append path.
+            context.contentResolver.openOutputStream(uri, "wa")
+                ?.use { it.write(payload.toByteArray()) } != null
+        }.getOrDefault(false)
+    }
 
     /** Pre-scoped-storage path. The host holds the storage permission on these versions. */
     private fun appendViaFile(payload: String): Boolean {

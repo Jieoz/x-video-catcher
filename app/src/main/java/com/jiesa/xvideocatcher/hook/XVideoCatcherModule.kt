@@ -80,14 +80,10 @@ class XVideoCatcherModule : IXposedHookLoadPackage {
             DiagLog.line("NOTE host version differs from the build this module was verified on")
         }
 
-        val strings = ModuleStrings()
-        val downloader = HostDownloader(strings)
-
-        ShareSheetInjector(
-            classLoader = classLoader,
-            moduleResources = strings,
-            onDownload = { ctx, tweet -> downloader.download(ctx, tweet) },
-        ).install()
+        // Diagnostic build: observes the share sheet and adds nothing to it. Versions 1.2-1.4 each
+        // injected against an anchor that turned out to have zero call sites in the shipped app, so
+        // the reachability of these anchors is confirmed from a device before injection returns.
+        SharePathProbe(classLoader).install()
 
         // Flush now so the file exists, and proves attachment, before the user touches anything.
         // Without this the log only appears after the first share sheet, and an absent file is

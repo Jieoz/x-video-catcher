@@ -3,65 +3,44 @@ package com.jiesa.xvideocatcher.hook
 /**
  * Names of the host classes and fields this module reaches into, plus how they were derived.
  *
- * X ships R8-obfuscated, so `com.twitter.ui.dialog.actionsheet.ActionSheetItem` is compiled to
- * `com.twitter.ui.dialog.actionsheet.b`. Package names survive, class and member names do not.
- * That means a hard-coded name is only valid for the exact build it was read from.
+ * X ships R8-obfuscated: package names survive, class and member names do not. A hard-coded name is
+ * therefore only valid for the exact build it was read from, so nothing here is trusted on its own.
+ * Class names are verified structurally by [HostResolver] and fields by shape via [HostShapes], and
+ * a host update degrades into "download entry missing" rather than a crash inside X.
  *
- * The values below were read out of X 12.13.0-beta.0 (versionCode 312130100) by walking the dex
- * tables directly. They are *candidates only* — never trusted on their own. Class names are
- * verified structurally by [HostResolver] and fields by shape via [HostShapes], so a host update
- * degrades into "download entry missing" rather than a crash inside X.
+ * ## Why the action-sheet anchors are gone
  *
- * Why a name alone is never enough, measured rather than assumed: in 12.13.0-release.0
- * (versionCode 312130000) the controller is `com.twitter.tweet.action.legacy.e0`, while the name
- * recorded from beta — `…legacy.h0` — is a *different class that still exists* (1 field, no show
- * method). `loadClass` on it succeeds, so a name-only lookup logged "controller resolved" and then
- * failed on the missing method. Both FATAL lines users saw came from that single wrong name.
+ * Versions 1.2–1.4 aimed at `com.twitter.ui.dialog.actionsheet` and `com.twitter.app.share.ui`.
+ * Instruction-level cross-referencing of 12.13.0-release.0 (walking every `invoke-*` in all 16 dex
+ * files) shows why nothing ever fired:
  *
- * Verification anchors — string constants in the host that identify a class regardless of its
- * obfuscated name. These are what make re-derivation possible, and they are stable because they
- * are debug/telemetry strings the obfuscator does not touch:
+ *  | target                                        | call sites in the whole APK |
+ *  |-----------------------------------------------|-----------------------------|
+ *  | `com.twitter.app.share.ShareSheetDialogFragment` | 0                        |
+ *  | `com.twitter.app.share.ui.d.n0` (1.4.0 anchor)   | 0                        |
+ *  | `com.twitter.share.chooser.j` (holds ComposeView)| 160                      |
  *
- *  | anchor                             | identifies                        |
- *  |------------------------------------|-----------------------------------|
- *  | `ActionSheetItem(drawableRes=`     | the share-sheet item model        |
- *  | `timeline_selected_caret_position` | the share-sheet controller        |
- *  | `share_menu_click`                 | the share-sheet open/click event  |
- *  | `MODEL3D`                          | the media-type enum               |
+ * That View-based sheet is dead code in this build: the classes exist and match their recorded
+ * shapes, which is exactly why resolution reported success while the panel stayed inert. Shape
+ * verification cannot catch this — a dead class has the right shape — so anchors are now chosen by
+ * *reachability*, not just structure.
+ *
+ * The live sheet is Compose, reached by `chooser.j.J0` attaching a `ComposeView` to the Activity's
+ * decor view. It has no View hierarchy to inject into, so the module works on the data instead: the
+ * row list, and the action a tap dispatches. Both are resolved by shape in [HostResolver].
  */
 internal object HostClasses {
 
     const val HOST_PACKAGE = "com.twitter.android"
 
     /** Build this module's anchors were read from. Logged so a mismatch is visible in logcat. */
-    const val VERIFIED_HOST_VERSION = "12.13.0-beta.0"
-
-    /**
-     * Share-sheet item model — `ActionSheetItem`.
-     *
-     * Field order is fixed by its own `toString()`, which spells out the names in declaration
-     * order: `ActionSheetItem(drawableRes=, actionId=, title=, subtitle=, color=, hasDivider=,
-     * iconColor=, titleContentDescription=, subtitleContentDescription=, bceLabel=,
-     * titleAccessibilityAction=)`.
-     *
-     * The 3-arg constructor `(int drawableRes, int actionId, String title)` is the one used to
-     * build an injected entry.
-     */
-    const val ACTION_SHEET_ITEM = "com.twitter.ui.dialog.actionsheet.b"
+    const val VERIFIED_HOST_VERSION = "12.13.0-release.0"
 
     /**
      * The one host name used verbatim, and the only one that can be.
      *
-     * X instantiates this fragment by name, so R8 has to keep it. Every other class the injector
-     * needs is reached *from* here by shape — the click-contract interface, the bind method, the
-     * sheet model — which is why no controller name appears in this file any more.
-     *
-     * Deleted along with the controller path: `SHARE_SHEET_CONTROLLER`, `SHARE_SHEET_ITEMS_FIELD`
-     * and `SHARE_SHEET_TWEET_FIELD`. Versions 1.2 and 1.3 hooked that controller
-     * (`com.twitter.tweet.action.legacy.e0`) and its `show(FragmentManager)`; device logs showed
-     * both hooks installing and never firing, because that class drives the **tweet action sheet**
-     * and not the share panel the user actually opens. Keeping the constants around as a fallback
-     * would only preserve a path proven not to reach the target.
+     * X instantiates this fragment by name, so R8 has to keep it. It is retained because it still
+     * anchors the media model lookups below; the share sheet itself no longer routes through it.
      */
     const val DIALOG_FRAGMENT = "com.twitter.app.common.dialog.BaseDialogFragment"
 
@@ -74,9 +53,8 @@ internal object HostClasses {
     const val MEDIA_VIDEO_INFO_FIELD = "r"
 
     /**
-     * Media-type enum. Constant *names* are not obfuscated (they are enum names, reachable via
-     * `Enum.name()`), which is why matching on the name is safe here while matching on a class
-     * name is not.
+     * Media-type enum. Constant *names* are not obfuscated (they are reachable via `Enum.name()`),
+     * which is why matching on the name is safe here while matching on a class name is not.
      */
     const val MEDIA_TYPE_ENUM = "com.twitter.model.core.entity.b0\$d"
     const val TYPE_VIDEO = "VIDEO"
@@ -93,4 +71,21 @@ internal object HostClasses {
      * c=bitrate)`, which is how the field roles were pinned down.
      */
     const val VIDEO_VARIANT = "com.twitter.media.av.model.a0"
+
+    // ---- Compose share sheet (the live one) --------------------------------
+    //
+    // Packages only. Every class inside is located by shape at runtime, since R8 renames within a
+    // package but does not move classes between packages.
+
+    /** Where the sheet is attached to the window: `chooser.j.J0`. */
+    const val CHOOSER_PACKAGE = "com.twitter.share.chooser"
+
+    /** Where the row list is built from `PackageManager`: `share.impl.c.a`. */
+    const val SHARE_IMPL_PACKAGE = "com.x.share.impl"
+
+    /** Where one row lives: `models.share.a`. */
+    const val SHARE_ROW_PACKAGE = "com.x.models.share"
+
+    /** Where tap actions and the sheet state live: `sharesheet.t$g`, `sharesheet.r.h`. */
+    const val SHARESHEET_PACKAGE = "com.x.dms.components.sharesheet"
 }
