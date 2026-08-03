@@ -92,7 +92,49 @@ class DiagSinkTest {
     @Test
     fun `file name carries the date`() {
         val day = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
-        assertEquals("xvc-diag-$day.log", DiagSink.fileName())
+        assertEquals("xvc-diag-$day.txt", DiagSink.fileName())
+    }
+
+    /**
+     * The extension must be one MediaStore accepts for the declared MIME type.
+     *
+     * Field failure this pins: the name ended `.log` while the row declared `text/plain`. MediaStore
+     * does not reject that combination, it *renames* -- storing `xvc-diag-20260803.log.txt`. Every
+     * subsequent `find()` then queried the pre-rename name, missed, and created another row: 32
+     * fragment files for a single session, and the path shown to the user did not exist.
+     *
+     * Asserting `.txt` specifically, not merely "has an extension": the whole defect was a name the
+     * store would not keep as given.
+     */
+    @Test
+    fun `file name extension matches the declared mime type`() {
+        assertTrue(
+            "MediaStore renames a text/plain row that does not end .txt",
+            DiagSink.fileName().endsWith(".txt"),
+        )
+    }
+
+    /**
+     * Sequential appends must reuse the row, not create one per flush.
+     *
+     * The 1.5.0-probe field failure, reduced: one session produced 32 numbered files because the
+     * name written and the name queried differed by the extension MediaStore had appended. Nothing
+     * concurrent about it -- every flush created a fresh row.
+     *
+     * Load-bearing check: revert [DiagSink.fileName] to `.log` and this fails, because [FakeRows]
+     * renames on create exactly as the real store does.
+     */
+    @Test
+    fun `repeated appends reuse a single row`() {
+        val rows = FakeRows(writers = 1)
+        repeat(4) { i -> assertTrue(DiagSink.appendTo(rows, "line-$i\n")) }
+
+        assertEquals(
+            "each flush created its own row: the stored name never matches the queried one",
+            1,
+            rows.rowCount(),
+        )
+        assertEquals("line-0\nline-1\nline-2\nline-3\n", rows.contentOf(0))
     }
 
     /**
@@ -106,8 +148,11 @@ class DiagSinkTest {
      * "sometimes".
      */
     private class FakeRows(private val writers: Int) : DiagSink.Rows {
+        /** A stored row: the name the store kept, which is not always the name asked for. */
+        private class Row(val name: String, val body: StringBuilder)
+
         private val lock = Object()
-        private val rows = LinkedHashMap<String, StringBuilder>()
+        private val rows = LinkedHashMap<String, Row>()
         private var nextId = 0
         private var arrived = 0
 
@@ -115,7 +160,7 @@ class DiagSinkTest {
         fun rowCount(): Int = synchronized(lock) { rows.size }
 
         fun contentOf(index: Int): String =
-            synchronized(lock) { rows.values.toList()[index].toString() }
+            synchronized(lock) { rows.values.toList()[index].body.toString() }
 
         /**
          * Releases every caller only once all of them have looked up the row.
@@ -137,21 +182,33 @@ class DiagSinkTest {
             }
         }
 
+        /**
+         * Looks up by stored display name, the way the real query does.
+         *
+         * This used to return `rows.keys.firstOrNull()`, ignoring [name] -- so it always "found" the
+         * row and could never express a lookup that misses its own creation. That is precisely how a
+         * MIME/extension mismatch fails in the field, and it shipped green past this suite. Keyed on
+         * the *stored* name so [create]'s rename is visible here.
+         */
         override fun find(name: String, relativePath: String): String? {
-            val existing = synchronized(lock) { rows.keys.firstOrNull() }
+            val existing = synchronized(lock) {
+                rows.entries.firstOrNull { it.value.name == name }?.key
+            }
             barrier()
             return existing
         }
 
         override fun create(name: String, relativePath: String): String = synchronized(lock) {
-            // MediaStore's real behaviour: a duplicate name is suffixed, not refused.
+            // Both real behaviours of insert(): a duplicate name is suffixed rather than refused,
+            // and a name whose extension contradicts the MIME type is renamed rather than kept.
+            val stored = if (name.endsWith(".txt")) name else "$name.txt"
             val id = "row-${nextId++}"
-            rows[id] = StringBuilder()
+            rows[id] = Row(stored, StringBuilder())
             id
         }
 
         override fun write(rowId: String, payload: String): Boolean = synchronized(lock) {
-            rows[rowId]!!.append(payload)
+            rows[rowId]!!.body.append(payload)
             true
         }
     }

@@ -167,6 +167,12 @@ internal object HostResolver {
                     if (m.returnType != Void.TYPE) continue
                     if (m.parameterTypes.size != 1) continue
                     if (m.parameterTypes[0] != actionRoot) continue
+                    // An abstract method has no body to instrument, and XposedBridge.hookMethod
+                    // throws IllegalArgumentException on one, which aborted install() in
+                    // 1.5.0-probe. The filter belongs here, not at the call site: "dispatch point"
+                    // means somewhere execution can be intercepted, and an interface declaration
+                    // is not one. Implementors are returned separately, so nothing is lost.
+                    if (Modifier.isAbstract(m.modifiers)) continue
                     if (seen.add("${cls.name}.${m.name}")) {
                         m.isAccessible = true
                         found.add(DispatchPoint(m, actionRoot))
@@ -185,9 +191,16 @@ internal object HostResolver {
      * The method that puts the sheet on screen: `(X) -> boolean` on the class holding both a
      * `ComposeView` and an `Activity`.
      *
-     * Verified unique inside `com.twitter.share.chooser` (real: `chooser.j.J0`, 160 call sites).
-     * Hooked purely as evidence that the panel opened, so a silent failure downstream can be told
-     * apart from the panel never reaching this module at all.
+     * **This anchor is confirmed off the path a tweet share takes.** 1.5.0-probe installed the hook
+     * successfully and it never fired once across three shares. Its four call sites are page-level
+     * entries (`app.main.l1`, `app.profiles.n0`, `browser.o`) plus one inside `chooser.b` -- the
+     * legacy chooser, not the Compose sheet that `com.x.share.impl` / `com.x.dms.components.sharesheet`
+     * actually drive. Reachable in the call graph and on the user's path are different properties,
+     * and the reachability gate can only prove the first.
+     *
+     * Kept resolved and hooked because a negative marker is still evidence: if it ever does fire,
+     * the host has switched sheet implementations. Sheet-open detection for the live path has to
+     * come from the packages the device proved, not from here.
      */
     fun sheetOpen(classLoader: ClassLoader): Method? {
         val hits = mutableListOf<Method>()

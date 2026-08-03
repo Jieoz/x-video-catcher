@@ -212,8 +212,33 @@ class SharePathAnchorTest {
         val owners = points.map { it.method.declaringClass.name }.toSet()
         assertEquals(
             "all dispatch points must be hooked — hooking one and assuming coverage is the 1.3.0 bug",
-            setOf("com.x.share.impl.b", "com.x.dms.components.sharesheet.r"),
+            setOf("com.x.share.impl.b", "com.x.dms.components.sharesheet.q"),
             owners,
+        )
+    }
+
+    /**
+     * An abstract declaration must not be returned as a dispatch point.
+     *
+     * The 1.5.0-probe device failure: `sharesheet.r.h` is abstract on the real build, and
+     * `XposedBridge.hookMethod` throws `IllegalArgumentException` on an abstract method. That threw
+     * straight out of `install()`, taking the remaining hooks and the flush with it -- partial
+     * instrumentation presenting as total silence.
+     *
+     * The fixture could not express this until `r` became an interface here, matching the host. While
+     * every candidate in it was concrete, this filter was unfalsifiable: removing it changed no
+     * result. Implementors are still returned, so the interface being skipped costs no coverage.
+     */
+    @Test
+    fun `dispatch skips abstract declarations`() {
+        val points = dispatchPoints()
+        assertTrue(
+            "an abstract method cannot be hooked; returning it aborted install() in 1.5.0-probe",
+            points.none { java.lang.reflect.Modifier.isAbstract(it.method.modifiers) },
+        )
+        assertTrue(
+            "the concrete implementor must still be found, or skipping the interface loses coverage",
+            points.any { it.method.declaringClass.name == "com.x.dms.components.sharesheet.q" },
         )
     }
 

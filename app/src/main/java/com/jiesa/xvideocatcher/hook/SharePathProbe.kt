@@ -60,9 +60,18 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
             DiagLog.line("PROBE   dispatch ${it.method.declaringClass.name}.${it.method.name}")
         }
 
-        open?.let { hookSheetOpen(it) }
-        provider?.let { hookRowProvider(it) }
-        dispatches.forEach { hookDispatch(it) }
+        // Each hook is installed independently. In 1.5.0-probe these were three bare calls, and one
+        // unhookable dispatch point threw straight out of install(), skipping every later hook plus
+        // the flush and the XposedBridge summary below. The result was the failure mode this build
+        // exists to eliminate: partial instrumentation that reads as total silence. A hook that
+        // cannot be installed is a fact to report, not a reason to abandon the others.
+        installHook("sheet-open") { open?.let { hookSheetOpen(it) } }
+        installHook("row-provider") { provider?.let { hookRowProvider(it) } }
+        dispatches.forEach { point ->
+            installHook("dispatch ${point.method.declaringClass.name}.${point.method.name}") {
+                hookDispatch(point)
+            }
+        }
 
         DiagLog.flushNow()
         XposedBridge.log(
@@ -72,56 +81,42 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
     }
 
     /**
-     * Records that the panel opened, and whether the shared tweet is reachable from here.
+     * Installs one hook, containing its failure to that hook.
      *
-     * Two unknowns are settled by this one hook. The first is reachability of the anchor itself. The
-     * second is where the tweet comes from in the Compose sheet: the old design captured it from a
-     * constructor pairing sheet and shareable, which no longer exists on this path. The sheet-open
-     * argument is the share subject, so if the tweet hangs off it then the real build needs no
-     * separate association step and no timing guesswork at all.
+     * The name is logged on failure so an uninstallable hook is attributable to a specific anchor.
+     * Without it a missing marker has two indistinguishable causes -- the hook was never installed,
+     * or it was installed and the code path never ran -- which is exactly the ambiguity that made
+     * 1.2 through 1.4 undiagnosable.
+     */
+    internal fun installHook(name: String, block: () -> Unit) {
+        runCatching(block).onFailure {
+            DiagLog.line("PROBE hook FAILED $name: $it")
+        }
+    }
+
+    /**
+     * Records that the legacy chooser opened, if it ever does.
+     *
+     * Kept for its negative value. 1.5.0-probe installed this hook successfully and it did not fire
+     * once across three shares, which is what identified `chooser.j.J0` as belonging to the old
+     * chooser rather than the Compose sheet. If this line ever appears, the host has switched sheet
+     * implementations and the live anchors need rechecking -- so its absence is now the expected
+     * result and its presence is the signal.
+     *
+     * Tweet lookup goes through the same [findTweetFrom] the live hooks use. It previously had its
+     * own near-identical implementation, which is one code path too many for one question: the
+     * variant on the dead path could drift from the one that actually reports.
      */
     private fun hookSheetOpen(method: java.lang.reflect.Method) {
         XposedBridge.hookMethod(method, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 runCatching {
                     DiagLog.line("PROBE sheet opened via ${method.declaringClass.name}.${method.name}")
-                    val subject = param.args.getOrNull(0)
-                    DiagLog.line("PROBE   subject=${subject?.javaClass?.name ?: "null"}")
-                    if (subject != null) describeSubject(subject)
+                    findTweetFrom("sheet-open", param.args.getOrNull(0))
                     DiagLog.flushNow()
                 }.onFailure { DiagLog.line("ERROR probe sheet-open failed: $it") }
             }
         })
-    }
-
-    /**
-     * Reports whether a tweet, and downloadable media, can be reached from the share subject.
-     *
-     * Runs the *production* extractor rather than a probe-local reimplementation: the question is
-     * whether the shipping code path works from this object, and a separate implementation here
-     * would answer a different question and could pass while the real one fails.
-     */
-    private fun describeSubject(subject: Any) {
-        val field = HostResolver.tweetFieldIn(subject.javaClass)
-        if (field == null) {
-            // Not fatal: the tweet may sit one level deeper. The field dump below is what makes the
-            // next step decidable without another round trip to the device.
-            DiagLog.line("PROBE   no tweet-model field on the subject; fields follow")
-            dumpFields(subject)
-            return
-        }
-        val tweet = runCatching { field.get(subject) }.getOrNull()
-        DiagLog.line("PROBE   tweet field ${field.name}: ${tweet?.javaClass?.name ?: "null"}")
-        if (tweet == null) return
-        val media = runCatching { TweetMedia.extract(tweet) }
-            .onFailure { DiagLog.line("PROBE   media extract threw: $it") }
-            .getOrNull() ?: return
-        DiagLog.line("PROBE   media extracted: ${media.size} item(s)")
-        media.take(MAX_ROWS_LOGGED).forEach {
-            // Host URLs are logged host-and-path only. The full query string on a video rendition
-            // carries a signed token, and this file is one the user forwards to someone else.
-            DiagLog.line("PROBE   media ${it.spec.kind} ${it.url.substringBefore('?')}")
-        }
     }
 
     /** One line per instance field, for deciding the next step when a lookup misses. */
@@ -161,6 +156,13 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
                     // the real build cannot inject and needs a different insertion point.
                     val mutable = probeMutability(rows)
                     DiagLog.line("PROBE   list mutable=$mutable")
+                    // Tweet reachability is asked here, not at sheet-open. 1.5.0-probe attached it
+                    // to the sheet-open hook, which is off the live path and never fired -- so the
+                    // one question the probe existed to answer came back blank. This hook is
+                    // device-proven to run, and its receiver is the provider that built the rows.
+                    // The arg was only ever the share URL string, so the receiver is where a tweet
+                    // reference can plausibly live.
+                    findTweetFrom("rows-provider", param.thisObject)
                     DiagLog.flushNow()
                 }.onFailure { DiagLog.line("ERROR probe rows failed: $it") }
             }
@@ -195,10 +197,74 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
                             "at ${point.method.declaringClass.name}.${point.method.name}"
                     )
                     describeAction(action)?.let { DiagLog.line("PROBE   $it") }
+                    // Second place a tweet reference could hang: the dispatcher itself. Asked at
+                    // both live hooks because either receiver would be enough for the real build,
+                    // and one round trip per candidate is the cost this probe exists to avoid.
+                    findTweetFrom("dispatch", param.thisObject)
                     DiagLog.flushNow()
                 }.onFailure { DiagLog.line("ERROR probe dispatch failed: $it") }
             }
         })
+    }
+
+    /**
+     * Looks for a reachable tweet model on [holder], then one level into its fields.
+     *
+     * Called from the two hooks the device proved live. One level deep because the direct lookup is
+     * what 1.5.0 would have done and the answer needs to survive the tweet sitting behind a
+     * ViewModel or state wrapper -- which is the normal shape on a Compose screen. Deeper than that
+     * is not worth guessing at from here; the field dump tells us where to look next instead.
+     *
+     * Runs the production [TweetMedia] extractor on whatever it finds, deliberately. A probe-local
+     * reimplementation could report media the shipping path cannot actually reach.
+     */
+    private fun findTweetFrom(where: String, holder: Any?) {
+        if (holder == null) {
+            DiagLog.line("PROBE   $where receiver=null")
+            return
+        }
+        DiagLog.line("PROBE   $where receiver=${holder.javaClass.name}")
+
+        HostResolver.tweetFieldIn(holder.javaClass)?.let { f ->
+            reportTweet("$where.${f.name}", runCatching { f.get(holder) }.getOrNull())
+            return
+        }
+
+        // One level down: check each field's own type for a tweet model.
+        for (f in holder.javaClass.declaredFields) {
+            if (Modifier.isStatic(f.modifiers)) continue
+            f.isAccessible = true
+            val v = runCatching { f.get(holder) }.getOrNull() ?: continue
+            HostResolver.tweetFieldIn(v.javaClass)?.let { inner ->
+                reportTweet(
+                    "$where.${f.name}.${inner.name}",
+                    runCatching { inner.get(v) }.getOrNull(),
+                )
+                return
+            }
+        }
+
+        // No tweet found: dump the shape so the next step is decidable without another device trip.
+        DiagLog.line("PROBE   $where no tweet model within 1 level; fields follow")
+        dumpFields(holder)
+    }
+
+    /** Reports a located tweet and what the production extractor makes of it. */
+    private fun reportTweet(path: String, tweet: Any?) {
+        if (tweet == null) {
+            DiagLog.line("PROBE   tweet at $path = null")
+            return
+        }
+        DiagLog.line("PROBE   TWEET FOUND at $path: ${tweet.javaClass.name}")
+        val media = runCatching { TweetMedia.extract(tweet) }
+            .onFailure { DiagLog.line("PROBE   media extract threw: $it") }
+            .getOrNull() ?: return
+        DiagLog.line("PROBE   media extracted: ${media.size} item(s)")
+        media.take(MAX_ROWS_LOGGED).forEach {
+            // Host-and-path only: the query string on a video rendition carries a signed token, and
+            // this file is one the user forwards on.
+            DiagLog.line("PROBE   media ${it.spec.kind} ${it.url.substringBefore('?')}")
+        }
     }
 
     /** A row as `package/activity "label"`, read by shape: the String fields in declaration order. */

@@ -33,8 +33,22 @@ internal object DiagSink {
     const val DIR_NAME = "XVideoCatcher"
     private const val MIME = "text/plain"
 
+    /** Must be the extension MediaStore maps [MIME] to. See [fileName]. */
+    private const val EXT = ".txt"
+
+    /**
+     * The extension has to agree with [MIME], or MediaStore silently renames the row.
+     *
+     * This was `.log` against `text/plain`. MediaStore does not accept a name whose extension
+     * contradicts the declared type: it appends its own, storing `xvc-diag-20260803.log.txt`. So
+     * [Rows.find] queried `DISPLAY_NAME='xvc-diag-20260803.log'`, never matched the row it had just
+     * created, and fell through to `create()` on every single flush -- 32 numbered files for one
+     * session, each holding a fragment, and the user was told to open a path that did not exist.
+     *
+     * Keeping both facing the same constant is what prevents the pair drifting apart again.
+     */
     fun fileName(now: Date = Date()): String =
-        "xvc-diag-${SimpleDateFormat("yyyyMMdd", Locale.US).format(now)}.log"
+        "xvc-diag-${SimpleDateFormat("yyyyMMdd", Locale.US).format(now)}$EXT"
 
     /**
      * The path shown to the user. Must equal where [append] actually writes: drift here sends

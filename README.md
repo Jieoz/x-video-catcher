@@ -204,7 +204,7 @@ is the whole test. Nothing happens when you open the module itself either; it ha
 Everything the module does is written to a log file on the device:
 
 ```
-Download/XVideoCatcher/xvc-diag-YYYYMMDD.log
+Download/XVideoCatcher/xvc-diag-YYYYMMDD.txt
 ```
 
 Open it with any file manager, or long-press to share it. No computer, no adb, no logcat.
@@ -213,8 +213,14 @@ The file is written by X's process, not by this module's app. That is forced by 
 its code executes under X's UID, so there is nowhere else it can write that is readable afterwards
 without root. The consequence to know about is that **the module's own app cannot read this file** —
 a non-media file in `Download/` is visible only to the app that created it, and `READ_MEDIA_*` does
-not cover `.log`. Any in-app "view log" button could only ever show zero records, which is why there
-isn't one.
+not cover documents. Any in-app "view log" button could only ever show zero records, which is why
+there isn't one.
+
+The name ends `.txt`, and that is load-bearing rather than cosmetic. The row is created with
+`text/plain`, and MediaStore does not accept a display name whose extension contradicts the MIME
+type — it silently renames. In 1.5.0-probe the name was `.log`, so every append queried a name the
+store had already rewritten, missed, and inserted again: one session arrived as **32 numbered
+fragments**, none complete, at a path that did not exist as advertised.
 
 The log answers the questions worth asking, in order:
 
@@ -225,19 +231,29 @@ The log answers the questions worth asking, in order:
 | `NOTE host version differs…` | X updated past the build these anchors came from — first thing to suspect |
 | `PROBE resolve …=MISS` | That anchor was not found at all. Names which one, so it is actionable |
 | `PROBE resolve dispatch=0 point(s)` | Tap dispatch has no anchor; a tap could never be caught |
-| **`PROBE sheet opened via …`** | **The key line.** The panel reached this module. Absent after opening a sheet ⇒ wrong anchor, full stop — this is what 1.2–1.4 could not tell us |
-| `PROBE   subject=…` | The share subject's class, followed by whether the tweet hangs off it |
-| `PROBE   tweet field …` / `no tweet-model field` | Whether media is reachable from the subject. On a miss, every field is dumped so the next step needs no second trip to the device |
-| `PROBE   media extracted: N item(s)` | The production extractor ran and found media — downloading would have worked |
-| `PROBE rows built: N row(s)` | The row list was produced, with its size and contents |
+| `PROBE hook FAILED <name>: …` | That one hook could not be installed. Names which, and the others still went on — in 1.5.0-probe a single unhookable method aborted `install()` and took the rest with it |
+| **`PROBE rows built: N row(s)`** | **A key line.** The sheet was built and this module saw it, with the row count and contents |
 | `PROBE   list mutable=true` | The list tolerates an append, so injection has a viable insertion point |
-| `PROBE action …` | A tap was dispatched and reached this module, naming the row chosen |
+| **`PROBE action …`** | **A key line.** A tap was dispatched and reached this module, naming the row chosen |
+| `PROBE   <where> receiver=…` | The class the tweet is being looked for on, at each live hook |
+| `PROBE   TWEET FOUND at …` | A tweet model is reachable from a hook that actually fires. This is what the probe exists to establish |
+| `PROBE   … no tweet model within 1 level; fields follow` | Not reachable there. Every field is dumped so the next step needs no second trip to the device |
+| `PROBE   media extracted: N item(s)` | The production extractor ran and found media — downloading would have worked |
+| `PROBE sheet opened via …` | **Expected to be absent.** `chooser.j.J0` belongs to the legacy chooser, proven off the tweet-share path (see below). If this appears, X has switched sheet implementations and every anchor needs rechecking |
 | `ERROR probe … failed: …` | A probe hook threw. It is caught, because a throw inside a host callback surfaces as X crashing |
 
-The three bold-path markers matter more than their contents. Earlier diagnosis was ambiguous because
-"the hook never fired" and "the log never landed" both presented as an absence — identical evidence
-for opposite causes. Every hook here logs on entry, before any condition, so `sheet opened`,
-`rows built` and `action` separate them: a missing marker now names which stage was never reached.
+The markers matter more than their contents. Earlier diagnosis was ambiguous because "the hook never
+fired" and "the log never landed" both presented as an absence — identical evidence for opposite
+causes. Every hook logs on entry, before any condition, so `rows built` and `action` separate them: a
+missing marker names which stage was never reached.
+
+That is what 1.5.0-probe settled, at the cost of two defects of its own. `chooser.j.J0` — hooked
+since 1.2 as the sheet-open anchor — was installed successfully and **never fired once**. Its call
+sites are page-level entries plus one in the legacy `chooser` package; the tweet share sheet is
+driven by `com.x.share.impl` and `com.x.dms.components.sharesheet` instead. The reachability gate
+passed it because it is genuinely reachable in the call graph, which is a different property from
+being on the path a user's tap takes, and no static check can settle the second one. Tweet lookup
+has moved onto the two hooks the device proved live.
 
 The previous release's `ENTRY SKIPPED` lines came from the same lesson. Five causes produced one
 symptom — a sheet with no download entry — and none said anything. That was the real defect: not the
