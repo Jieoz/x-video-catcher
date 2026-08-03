@@ -72,6 +72,11 @@ class XVideoCatcherModule : IXposedHookLoadPackage {
         DiagLog.setSessionTag(hostVersion ?: "unknown")
         DiagLog.bindContext(context)
         DiagLog.line("=== module attached ===")
+        // Start foreground tracking before any share hook can fire. The tweet detail screen resumes
+        // long before the sheet opens, so a tracker installed at share time would have missed the
+        // event that identifies it.
+        HostActivity.track(context)
+
         DiagLog.line("module ${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
         DiagLog.line("host $hostVersion, anchors read from ${HostClasses.VERIFIED_HOST_VERSION}")
         if (hostVersion != null && hostVersion != HostClasses.VERIFIED_HOST_VERSION) {

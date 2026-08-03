@@ -229,18 +229,20 @@ The log answers the questions worth asking, in order:
 | Nothing at all, no file | Module never loaded — not enabled in LSPosed, scope missing, or X not force-stopped |
 | `=== module attached ===` | Hook is live; the line after it gives module and host versions |
 | `NOTE host version differs…` | X updated past the build these anchors came from — first thing to suspect |
-| `PROBE resolve …=MISS` | That anchor was not found at all. Names which one, so it is actionable |
+| `PROBE resolve` …`=MISS` | That anchor was not found at all. Names which one, so it is actionable |
 | `PROBE resolve dispatch=0 point(s)` | Tap dispatch has no anchor; a tap could never be caught |
 | `PROBE hook FAILED <name>: …` | That one hook could not be installed. Names which, and the others still went on — in 1.5.0-probe a single unhookable method aborted `install()` and took the rest with it |
 | **`PROBE rows built: N row(s)`** | **A key line.** The sheet was built and this module saw it, with the row count and contents |
 | `PROBE   list mutable=true` | The list tolerates an append, so injection has a viable insertion point |
 | **`PROBE action …`** | **A key line.** A tap was dispatched and reached this module, naming the row chosen |
-| `PROBE   <where> receiver=…` | The class the tweet is being looked for on, at each live hook |
-| `PROBE   TWEET FOUND at …` | A tweet model is reachable from a hook that actually fires. This is what the probe exists to establish |
-| `PROBE   … no tweet model within 1 level; fields follow` | Not reachable there. Every field is dumped so the next step needs no second trip to the device |
+| `PROBE   <where> receiver=` … | The class the tweet is being looked for on, at each live hook |
+| `PROBE   TWEET FOUND at …` | Emitted per candidate by the reporter, after the search names it. On 1.6.0-probe this never appeared (`TWEET FOUND: 0`), which is what motivated searching beyond one level |
+| **`candidate(s)`** — full line `PROBE   <where> N candidate(s) visits=… exhausted=…` | **A key line.** Tweet models are reachable from a hook that fires, with the search cost. `exhausted=true` means the visit budget ran out, which is a different finding from a clean miss and must not be read as one |
+| **`PROBE     [`** — full line `PROBE     [n] depth=… <class> @ <path>` | **The payload.** One line per candidate, naming the field path walked to reach it. This is what lets the shipping build read the tweet directly instead of searching on every tap |
+| `NO tweet candidate` — full line `PROBE   <where> NO tweet candidate (visits=… exhausted=… roots=…)` | Nothing reachable from either root. Every field of the receiver is dumped, so the next step needs no second trip to the device |
 | `PROBE   media extracted: N item(s)` | The production extractor ran and found media — downloading would have worked |
 | `PROBE sheet opened via …` | **Expected to be absent.** `chooser.j.J0` belongs to the legacy chooser, proven off the tweet-share path (see below). If this appears, X has switched sheet implementations and every anchor needs rechecking |
-| `ERROR probe … failed: …` | A probe hook threw. It is caught, because a throw inside a host callback surfaces as X crashing |
+| `ERROR probe` … failed: … | A probe hook threw. It is caught, because a throw inside a host callback surfaces as X crashing |
 
 The markers matter more than their contents. Earlier diagnosis was ambiguous because "the hook never
 fired" and "the log never landed" both presented as an absence — identical evidence for opposite

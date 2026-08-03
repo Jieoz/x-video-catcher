@@ -222,6 +222,21 @@ internal object HostResolver {
     }
 
     /**
+     * Whether [type] is a host tweet model.
+     *
+     * The module's single definition, shared by [tweetFieldIn] (which asks about a declared field's
+     * type) and [TweetSearch] (which asks about a live object's class). An earlier draft of the
+     * search carried its own field-count heuristic, which is how you end up with two disagreeing
+     * answers to one question -- the search would accept an object `tweetFieldIn` rejects.
+     *
+     * Matched by package, not class name: R8 renames `com.twitter.model.core.e` on every release but
+     * does not move it out of its package. Enums are excluded because the media-type enum lives in
+     * the same package tree and is not a tweet.
+     */
+    fun isTweetModel(type: Class<*>): Boolean =
+        type.name.startsWith(TWEET_MODEL_PACKAGE) && !type.isEnum
+
+    /**
      * The field holding a tweet, searched up [start]'s superclass chain.
      *
      * Walking the chain matters: a shareable is typed as a base class with no tweet, and the tweet
@@ -232,9 +247,7 @@ internal object HostResolver {
         var cls: Class<*>? = start
         while (cls != null && cls != Any::class.java) {
             val fields = cls.declaredFields.filter {
-                !Modifier.isStatic(it.modifiers) &&
-                    it.type.name.startsWith(TWEET_MODEL_PACKAGE) &&
-                    !it.type.isEnum
+                !Modifier.isStatic(it.modifiers) && isTweetModel(it.type)
             }
             val hit = fields.singleOrNull()
                 // If a build adds a second model field, prefer the fat one: the tweet body has far

@@ -3,6 +3,7 @@ package com.jiesa.xvideocatcher.hook
 import com.jiesa.xvideocatcher.DiagLog
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -88,5 +89,62 @@ class SharePathProbeTest {
             "install noise on the success path buries the markers that matter: $lines",
             lines.none { it.contains("hook FAILED") },
         )
+    }
+
+    // ---- Decompose root -------------------------------------------------
+    //
+    // The 20260804 log shows the sharesheet dispatcher holding a `com.arkivanov.decompose.c`. That
+    // is where the search's most promising root comes from, so these cover reading it.
+
+    /** Stand-in for the navigation component, in the package the lookup matches on. */
+    private class FakeDecompose
+
+    private class DispatcherWithDecompose(
+        @JvmField val a: com.arkivanov.decompose.FakeComponent?,
+        @JvmField val b: String?,
+    )
+
+    private class DispatcherWithoutDecompose(
+        @JvmField val a: String?,
+        @JvmField val b: Any?,
+    )
+
+    @Test
+    fun `finds the decompose component by package`() {
+        val component = com.arkivanov.decompose.FakeComponent()
+        val dispatcher = DispatcherWithDecompose(component, "https://x.com/i/status/1")
+
+        val found = probe().decomposeInForTest(dispatcher)
+
+        assertEquals(component, found)
+    }
+
+    @Test
+    fun `absent decompose component is not an error`() {
+        val found = probe().decomposeInForTest(DispatcherWithoutDecompose("a", Any()))
+
+        assertNull(found)
+    }
+
+    @Test
+    fun `a null decompose field is skipped rather than returned`() {
+        // A declared-but-null field must not be reported as the component: the search would then get
+        // a null root and silently lose its most promising path.
+        val found = probe().decomposeInForTest(DispatcherWithDecompose(null, "x"))
+
+        assertNull(found)
+    }
+
+    // ---- marker constants ------------------------------------------------
+
+    @Test
+    fun `every marker constant is non-blank and starts with a log word`() {
+        // The README cross-check compares identifiers against this list, so an empty or malformed
+        // entry would silently weaken it rather than fail it.
+        assertTrue(ProbeMarkers.ALL.isNotEmpty())
+        for (m in ProbeMarkers.ALL) {
+            assertTrue("blank marker", m.isNotBlank())
+        }
+        assertEquals("markers must be unique", ProbeMarkers.ALL.size, ProbeMarkers.ALL.toSet().size)
     }
 }

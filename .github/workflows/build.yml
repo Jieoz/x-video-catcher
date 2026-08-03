@@ -260,6 +260,23 @@ jobs:
           set -euo pipefail
           python3 "$GITHUB_WORKSPACE/tools/ablate_reachability.py"
 
+      # The README's marker table is what a device log gets read against, so a row promising a line
+      # the build cannot print sends the reader hunting for output that will never appear -- which has
+      # already cost a round trip on this project. Checking it by comparing prose to string literals
+      # failed three times (every heuristic changed which markers it got wrong without reducing the
+      # count), so the markers are declared as constants and this compares identifier sets.
+      - name: Check the README marker table against the declared markers
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/tools/check_markers.py"
+
+      # The marker gate went green the moment the constants were adopted, which is when a gate is
+      # least trustworthy. This ablates each axis it claims to cover.
+      - name: Prove the marker gate is load-bearing
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/tools/ablate_markers.py"
+
       - name: Verify anchors against a host APK
         if: hashFiles('host/**/*.apk') != ''
         run: |

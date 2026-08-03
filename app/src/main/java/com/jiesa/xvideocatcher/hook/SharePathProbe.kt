@@ -51,11 +51,11 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
 
         // One resolution summary, so a miss is attributable to a specific anchor rather than to
         // "the probe did nothing".
-        DiagLog.line("PROBE resolve row=${row?.name ?: "MISS"}")
-        DiagLog.line("PROBE resolve provider=${provider?.let { "${it.declaringClass.name}.${it.name}" } ?: "MISS"}")
-        DiagLog.line("PROBE resolve open=${open?.let { "${it.declaringClass.name}.${it.name}" } ?: "MISS"}")
-        DiagLog.line("PROBE resolve action=${action?.name ?: "MISS"}")
-        DiagLog.line("PROBE resolve dispatch=${dispatches.size} point(s)")
+        DiagLog.line("${ProbeMarkers.RESOLVE} row=${row?.name ?: "MISS"}")
+        DiagLog.line("${ProbeMarkers.RESOLVE} provider=${provider?.let { "${it.declaringClass.name}.${it.name}" } ?: "MISS"}")
+        DiagLog.line("${ProbeMarkers.RESOLVE} open=${open?.let { "${it.declaringClass.name}.${it.name}" } ?: "MISS"}")
+        DiagLog.line("${ProbeMarkers.RESOLVE} action=${action?.name ?: "MISS"}")
+        DiagLog.line("${ProbeMarkers.RESOLVE} dispatch=${dispatches.size} point(s)")
         dispatches.forEach {
             DiagLog.line("PROBE   dispatch ${it.method.declaringClass.name}.${it.method.name}")
         }
@@ -90,7 +90,7 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
      */
     internal fun installHook(name: String, block: () -> Unit) {
         runCatching(block).onFailure {
-            DiagLog.line("PROBE hook FAILED $name: $it")
+            DiagLog.line("${ProbeMarkers.HOOK_FAILED} $name: $it")
         }
     }
 
@@ -111,13 +111,33 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
         XposedBridge.hookMethod(method, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 runCatching {
-                    DiagLog.line("PROBE sheet opened via ${method.declaringClass.name}.${method.name}")
+                    DiagLog.line("${ProbeMarkers.SHEET_OPENED} ${method.declaringClass.name}.${method.name}")
                     findTweetFrom("sheet-open", param.args.getOrNull(0))
                     DiagLog.flushNow()
-                }.onFailure { DiagLog.line("ERROR probe sheet-open failed: $it") }
+                }.onFailure { DiagLog.line("${ProbeMarkers.PROBE_ERROR} sheet-open failed: $it") }
             }
         })
     }
+
+    /**
+     * The Decompose component held by [target], if any.
+     *
+     * Matched by package, like every other host lookup here: `com.arkivanov.decompose` is a
+     * third-party library, so its package is stable across X releases even though R8 shortens the
+     * class names inside it.
+     */
+    private fun decomposeIn(target: Any): Any? {
+        for (f in target.javaClass.declaredFields) {
+            if (Modifier.isStatic(f.modifiers)) continue
+            if (!f.type.name.startsWith(DECOMPOSE_PACKAGE)) continue
+            f.isAccessible = true
+            runCatching { f.get(target) }.getOrNull()?.let { return it }
+        }
+        return null
+    }
+
+    /** Test seam for [decomposeIn], which is private because nothing outside should call it. */
+    internal fun decomposeInForTest(target: Any): Any? = decomposeIn(target)
 
     /** One line per instance field, for deciding the next step when a lookup misses. */
     private fun dumpFields(target: Any) {
@@ -141,10 +161,10 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
                 runCatching {
                     val rows = param.result as? java.util.ArrayList<*>
                     if (rows == null) {
-                        DiagLog.line("PROBE rows built: result=${param.result?.javaClass?.name ?: "null"}")
+                        DiagLog.line("${ProbeMarkers.ROWS_BUILT} result=${param.result?.javaClass?.name ?: "null"}")
                         return
                     }
-                    DiagLog.line("PROBE rows built: ${rows.size} row(s), arg=${param.args.getOrNull(0)}")
+                    DiagLog.line("${ProbeMarkers.ROWS_BUILT} ${rows.size} row(s), arg=${param.args.getOrNull(0)}")
                     rows.take(MAX_ROWS_LOGGED).forEach { r ->
                         DiagLog.line("PROBE   row ${describeRow(r)}")
                     }
@@ -155,7 +175,7 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
                     // append a row-typed clone of the first entry, then remove it. If this throws,
                     // the real build cannot inject and needs a different insertion point.
                     val mutable = probeMutability(rows)
-                    DiagLog.line("PROBE   list mutable=$mutable")
+                    DiagLog.line("${ProbeMarkers.LIST_MUTABLE}$mutable")
                     // Tweet reachability is asked here, not at sheet-open. 1.5.0-probe attached it
                     // to the sheet-open hook, which is off the live path and never fired -- so the
                     // one question the probe existed to answer came back blank. This hook is
@@ -164,7 +184,7 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
                     // reference can plausibly live.
                     findTweetFrom("rows-provider", param.thisObject)
                     DiagLog.flushNow()
-                }.onFailure { DiagLog.line("ERROR probe rows failed: $it") }
+                }.onFailure { DiagLog.line("${ProbeMarkers.PROBE_ERROR} rows failed: $it") }
             }
         })
     }
@@ -193,7 +213,7 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
                 runCatching {
                     val action = param.args.getOrNull(0) ?: return
                     DiagLog.line(
-                        "PROBE action ${action.javaClass.name} " +
+                        "${ProbeMarkers.ACTION} ${action.javaClass.name} " +
                             "at ${point.method.declaringClass.name}.${point.method.name}"
                     )
                     describeAction(action)?.let { DiagLog.line("PROBE   $it") }
@@ -202,7 +222,7 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
                     // and one round trip per candidate is the cost this probe exists to avoid.
                     findTweetFrom("dispatch", param.thisObject)
                     DiagLog.flushNow()
-                }.onFailure { DiagLog.line("ERROR probe dispatch failed: $it") }
+                }.onFailure { DiagLog.line("${ProbeMarkers.PROBE_ERROR} dispatch failed: $it") }
             }
         })
     }
@@ -220,34 +240,53 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
      */
     private fun findTweetFrom(where: String, holder: Any?) {
         if (holder == null) {
-            DiagLog.line("PROBE   $where receiver=null")
+            DiagLog.line("PROBE   $where ${ProbeMarkers.RECEIVER}null")
             return
         }
-        DiagLog.line("PROBE   $where receiver=${holder.javaClass.name}")
+        DiagLog.line("PROBE   $where ${ProbeMarkers.RECEIVER}${holder.javaClass.name}")
 
-        HostResolver.tweetFieldIn(holder.javaClass)?.let { f ->
-            reportTweet("$where.${f.name}", runCatching { f.get(holder) }.getOrNull())
+        // Roots in order of expected yield. The receiver first because it is cheapest and a direct
+        // hit is the ideal outcome; the resumed activity second because the tweet detail screen is
+        // where the tweet demonstrably is when the sheet is opened from it -- 1.6.0 proved the sheet
+        // itself does not carry one. Both share one visit budget, and an exhausted budget is
+        // reported rather than looking like a clean miss.
+        // Roots, ordered by how directly they are expected to reach the tweet. They share one visit
+        // budget and the search stops once it has enough candidates, so a later root costs nothing
+        // when an earlier one hits.
+        val roots = mutableListOf<Pair<String, Any?>>("$where-receiver" to holder)
+
+        // The 20260804 log shows every sharesheet dispatcher holding a `com.arkivanov.decompose.c`.
+        // Decompose is X's navigation library, and the sheet is a child component of the screen that
+        // opened it -- so its component tree leads back to the tweet detail screen. Reachable
+        // straight from an object the hook already has, which the activity is not.
+        decomposeIn(holder)?.let { roots.add("decompose" to it) }
+
+        HostActivity.current()?.let { roots.add("activity:${it.javaClass.simpleName}" to it) }
+
+        val outcome = TweetSearch.find(roots)
+
+        if (outcome.candidates.isEmpty()) {
+            DiagLog.line(
+                "PROBE   $where ${ProbeMarkers.NO_CANDIDATE} " +
+                    "(visits=${outcome.visits} exhausted=${outcome.exhausted} " +
+                    "roots=${roots.size})",
+            )
+            dumpFields(holder)
             return
         }
 
-        // One level down: check each field's own type for a tweet model.
-        for (f in holder.javaClass.declaredFields) {
-            if (Modifier.isStatic(f.modifiers)) continue
-            f.isAccessible = true
-            val v = runCatching { f.get(holder) }.getOrNull() ?: continue
-            HostResolver.tweetFieldIn(v.javaClass)?.let { inner ->
-                reportTweet(
-                    "$where.${f.name}.${inner.name}",
-                    runCatching { inner.get(v) }.getOrNull(),
-                )
-                return
-            }
+        DiagLog.line(
+            "PROBE   $where ${outcome.candidates.size} ${ProbeMarkers.CANDIDATES} " +
+                "visits=${outcome.visits} exhausted=${outcome.exhausted}",
+        )
+        for ((n, c) in outcome.candidates.withIndex()) {
+            // The path is the payload: it is what lets the shipping build reach the tweet directly
+            // instead of searching on every tap.
+            DiagLog.line("${ProbeMarkers.CANDIDATE_PATH}$n] depth=${c.depth} ${c.value.javaClass.name} @ ${c.path}")
+            reportTweet("$where[$n]", c.value)
         }
-
-        // No tweet found: dump the shape so the next step is decidable without another device trip.
-        DiagLog.line("PROBE   $where no tweet model within 1 level; fields follow")
-        dumpFields(holder)
     }
+
 
     /** Reports a located tweet and what the production extractor makes of it. */
     private fun reportTweet(path: String, tweet: Any?) {
@@ -255,11 +294,11 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
             DiagLog.line("PROBE   tweet at $path = null")
             return
         }
-        DiagLog.line("PROBE   TWEET FOUND at $path: ${tweet.javaClass.name}")
+        DiagLog.line("${ProbeMarkers.TWEET_FOUND} $path: ${tweet.javaClass.name}")
         val media = runCatching { TweetMedia.extract(tweet) }
             .onFailure { DiagLog.line("PROBE   media extract threw: $it") }
             .getOrNull() ?: return
-        DiagLog.line("PROBE   media extracted: ${media.size} item(s)")
+        DiagLog.line("${ProbeMarkers.MEDIA_EXTRACTED} ${media.size} item(s)")
         media.take(MAX_ROWS_LOGGED).forEach {
             // Host-and-path only: the query string on a video rendition carries a signed token, and
             // this file is one the user forwards on.
@@ -299,4 +338,7 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
         /** Enough to identify the list without flooding a user's log with every installed app. */
         const val MAX_ROWS_LOGGED = 12
     }
+
+    /** Navigation library the share sheet is a child component of. Third-party, so stable. */
+    private val DECOMPOSE_PACKAGE = "com.arkivanov.decompose"
 }
