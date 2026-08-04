@@ -38,6 +38,11 @@ GRADLE = [
     "--tests", "*TweetSearchTest*", "--tests", "*CriterionTest*", "--tests", "*CensusGuardTest*",
 ]
 
+FINAL_RETURN = """        return Outcome(
+            found, visits, exhausted = false,
+            census = packageCensus(census), pruned = packageCensus(pruned),
+        )"""
+
 OLD_TRAVERSAL = """        var frontier = roots.mapNotNull { (name, value) -> value?.let { name to it } }
         var depth = 0
 
@@ -46,7 +51,10 @@ OLD_TRAVERSAL = """        var frontier = roots.mapNotNull { (name, value) -> va
             for ((path, node) in frontier) {
                 if (!seen.add(node)) continue
                 if (++visits > MAX_VISITS) {
-                    return Outcome(found, visits, exhausted = true, census = packageCensus(census))
+                    return Outcome(
+                        found, visits, exhausted = true,
+                        census = packageCensus(census), pruned = packageCensus(pruned),
+                    )
                 }
                 val prefix = packagePrefix(node.javaClass.name)
                 census[prefix] = (census[prefix] ?: 0) + 1
@@ -54,7 +62,10 @@ OLD_TRAVERSAL = """        var frontier = roots.mapNotNull { (name, value) -> va
                 if (HostResolver.isTweetModel(node.javaClass)) {
                     found.add(Candidate(node, path, depth))
                     if (found.size >= MAX_CANDIDATES)
-                        return Outcome(found, visits, false, packageCensus(census))
+                        return Outcome(
+                            found, visits, false,
+                            packageCensus(census), packageCensus(pruned),
+                        )
                     // Do not descend into a candidate: its own fields are the tweet's internals,
                     // and a quoted tweet hanging off it is a different tweet, reported separately
                     // if it is reachable another way.
@@ -62,6 +73,16 @@ OLD_TRAVERSAL = """        var frontier = roots.mapNotNull { (name, value) -> va
                 }
 
                 if (depth == MAX_DEPTH) continue
+
+                // A DI provider is a hub to the entire application singleton graph. Walking one
+                // costs hundreds of visits and cannot pay out, because a tweet is request state,
+                // never an injected singleton. Counted, not silently dropped.
+                if (isInjectionPlumbing(node.javaClass)) {
+                    val p = packagePrefix(node.javaClass.name)
+                    pruned[p] = (pruned[p] ?: 0) + 1
+                    continue
+                }
+
                 for ((label, child) in childrenOf(node)) next.add("$path.$label" to child)
             }
             frontier = next
@@ -69,7 +90,7 @@ OLD_TRAVERSAL = """        var frontier = roots.mapNotNull { (name, value) -> va
         }"""
 
 DFS_TRAVERSAL = """        // ablated: depth-first via an explicit stack. Permuting a level's internal order -- which
-        // both earlier attempts at this ablation did -- leaves the level-by-level structure intact
+        // two earlier attempts at this ablation did -- leaves the level-by-level structure intact
         // and cannot change which depth is reached first. Only replacing the structure does.
         val stack = ArrayDeque(
             roots.mapNotNull { (name, value) -> value?.let { Triple(name, it, 0) } }.reversed()
@@ -78,7 +99,10 @@ DFS_TRAVERSAL = """        // ablated: depth-first via an explicit stack. Permut
             val (path, node, depth) = stack.removeLast()
             if (!seen.add(node)) continue
             if (++visits > MAX_VISITS) {
-                return Outcome(found, visits, exhausted = true, census = packageCensus(census))
+                return Outcome(
+                    found, visits, exhausted = true,
+                    census = packageCensus(census), pruned = packageCensus(pruned),
+                )
             }
             val prefix = packagePrefix(node.javaClass.name)
             census[prefix] = (census[prefix] ?: 0) + 1
@@ -86,11 +110,23 @@ DFS_TRAVERSAL = """        // ablated: depth-first via an explicit stack. Permut
             if (HostResolver.isTweetModel(node.javaClass)) {
                 found.add(Candidate(node, path, depth))
                 if (found.size >= MAX_CANDIDATES)
-                    return Outcome(found, visits, false, packageCensus(census))
+                    return Outcome(
+                        found, visits, false,
+                        packageCensus(census), packageCensus(pruned),
+                    )
                 continue
             }
 
             if (depth >= MAX_DEPTH) continue
+
+            // Kept identical to the real walk: this axis isolates traversal order, so pruning must
+            // not also change between the two versions.
+            if (isInjectionPlumbing(node.javaClass)) {
+                val p = packagePrefix(node.javaClass.name)
+                pruned[p] = (pruned[p] ?: 0) + 1
+                continue
+            }
+
             for ((label, child) in childrenOf(node).reversed()) {
                 stack.addLast(Triple("$path.$label", child, depth + 1))
             }
@@ -131,8 +167,8 @@ ABLATIONS = [
         "census populated",
         "an empty census on a failed walk is the case it exists for",
         TS,
-        "        return Outcome(found, visits, exhausted = false, census = packageCensus(census))",
-        "        return Outcome(found, visits, exhausted = false, census = emptyList())",
+        FINAL_RETURN,
+        FINAL_RETURN.replace("census = packageCensus(census)", "census = emptyList()"),
     ),
 ]
 
