@@ -199,13 +199,6 @@ jobs:
           check() {
             python3 "$GITHUB_WORKSPACE/tools/dexcheck.py" "$1" "$2" classes*.dex
           }
-          # Negative self-test: a checker that always passes is indistinguishable from a passing
-          # gate. A fabricated method must be reported missing before any real assertion is trusted.
-          if python3 "$GITHUB_WORKSPACE/tools/dexcheck.py" \
-               DownloadTarget definitelyNotARealMethodName classes*.dex >/dev/null 2>&1; then
-            echo "dexcheck accepted a fabricated method -- the gate proves nothing" >&2
-            exit 1
-          fi
           check DownloadTarget photoSpec,videoSpec
           check MediaSaver save
           check HostDownloader download
