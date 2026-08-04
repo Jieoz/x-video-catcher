@@ -8,7 +8,7 @@ Everything runs inside X's process. There is no activity, no service, no backgro
 no launcher icon — the APK exists only to be loaded into X by LSPosed. Installing it and opening
 it does nothing by design; the entry appears in X.
 
-> ### 1.5.0-probe adds no entry, on purpose
+> ### 1.8.0-probe adds no entry, on purpose
 >
 > **The current build is diagnostic. It watches the share sheet and changes nothing in it, so there
 > is no download entry to look for and no download to trigger.** What it does instead is record what
@@ -24,7 +24,7 @@ it does nothing by design; the entry appears in X.
 
 | Item | Value |
 | --- | --- |
-| Host app | `com.twitter.android` 12.13.0-beta.0 (versionCode 312130100) |
+| Host app | `com.twitter.android` 12.13.0-release.0 (the build the device runs; anchors are resolved at runtime, not read from an APK) |
 | Module | `com.jiesa.xvideocatcher` |
 | minSdk / targetSdk | 28 / 35 |
 | Framework | LSPosed (Xposed API 82 floor) |
@@ -41,7 +41,9 @@ Four pieces, in the order they run:
 | Class | Job |
 | --- | --- |
 | `XVideoCatcherModule` | entry point; installs hooks once a host `Application` context exists |
-| `SharePathProbe` | 1.5.0: observes sheet open, row list and tap dispatch; adds nothing to the UI |
+| `SharePathProbe` | Observes sheet open, row list and tap dispatch; adds nothing to the UI |
+| `TweetSearch` | Bounded breadth-first search for the tweet model, over hook receivers, the Decompose component tree and the foreground activity |
+| `HostActivity` | Tracks the foreground activity via `Application.registerActivityLifecycleCallbacks` |
 | `TweetMedia` | walks the live tweet object graph, picks the best rendition per item |
 | `HostDownloader` | fetches on a small pool, saves via MediaStore, reports by toast |
 
@@ -195,7 +197,7 @@ unit tests caught neither the `name=orig` 404 nor the webp downgrade — both ne
 2. Force-stop X so it restarts with the module attached.
 3. Open a post with video or photos, tap share.
 
-**1.5.0-probe changes nothing you can see.** No entry appears in the sheet; that is the expected
+**1.8.0-probe changes nothing you can see.** No entry appears in the sheet; that is the expected
 result, not a failure. Open a video post's share sheet, tap any row, then read the log below — that
 is the whole test. Nothing happens when you open the module itself either; it has no UI.
 
@@ -236,6 +238,7 @@ The log answers the questions worth asking, in order:
 | `PROBE   list mutable=true` | The list tolerates an append, so injection has a viable insertion point |
 | **`PROBE action …`** | **A key line.** A tap was dispatched and reached this module, naming the row chosen |
 | `PROBE   <where> receiver=` … | The class the tweet is being looked for on, at each live hook |
+| `PROBE     census <pkg>=<n>` | Package histogram of the objects a failed walk examined. Printed only when nothing was found, and it is what separates "the predicate recognised nothing" from "the tweet is not reachable from here" |
 | `PROBE   TWEET FOUND at …` | Emitted per candidate by the reporter, after the search names it. On 1.6.0-probe this never appeared (`TWEET FOUND: 0`), which is what motivated searching beyond one level |
 | **`candidate(s)`** — full line `PROBE   <where> N candidate(s) visits=… exhausted=…` | **A key line.** Tweet models are reachable from a hook that fires, with the search cost. `exhausted=true` means the visit budget ran out, which is a different finding from a clean miss and must not be read as one |
 | **`PROBE     [`** — full line `PROBE     [n] depth=… <class> @ <path>` | **The payload.** One line per candidate, naming the field path walked to reach it. This is what lets the shipping build read the tweet directly instead of searching on every tap |

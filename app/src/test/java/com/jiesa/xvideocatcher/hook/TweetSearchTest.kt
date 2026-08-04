@@ -92,13 +92,14 @@ class TweetSearchTest {
     }
 
     @Test
-    fun `reports thin holders too, since only the extractor can rule them out`() {
-        // Same package as the tweet, one field. The search must not silently drop it: an earlier
-        // draft used a field-count guess here, which contradicted HostResolver's own predicate.
-        // Whether it carries media is TweetMedia's answer to give, on device.
+    fun `does not report an id holder from the tweet package`() {
+        // An earlier version of this test asserted the opposite, because the predicate was then a
+        // package prefix and could not tell these apart -- so it deferred to TweetMedia. That
+        // deference manufactured the ambiguity this probe exists to remove: an id holder extracts to
+        // "no media", which reads in the log exactly like a text-only tweet.
         val outcome = TweetSearch.find(listOf("holder" to ThinHolder(7L)))
 
-        assertEquals(1, outcome.candidates.size)
+        assertTrue(outcome.candidates.isEmpty())
     }
 
     @Test
@@ -110,12 +111,25 @@ class TweetSearchTest {
 
     @Test
     fun `uses the same predicate as HostResolver`() {
-        // One definition, two callers. If these ever disagree the module has two answers to one
-        // question, which is the bug this test exists to prevent.
-        assertTrue(HostResolver.isTweetModel(TweetWrapper::class.java))
-        assertTrue(HostResolver.isTweetModel(ThinHolder::class.java))
-        assertTrue(!HostResolver.isTweetModel(MediaKind::class.java))
-        assertTrue(!HostResolver.isTweetModel(String::class.java))
+        // One definition, two callers. Asserted as agreement rather than as specific verdicts: an
+        // earlier version hard-coded the package-prefix era's answers, so changing the predicate
+        // broke the test that was supposed to be guarding consistency.
+        val samples = listOf<Any>(
+            TweetWrapper("t"),
+            ThinHolder(7L),
+            MediaKind.VIDEO,
+            "plain string",
+        )
+
+        samples.forEach { sample ->
+            val viaSearch = TweetSearch.find(listOf("root" to sample)).candidates.isNotEmpty()
+            val viaResolver = HostResolver.isTweetModel(sample.javaClass)
+            assertEquals(
+                "search and HostResolver disagree about ${sample.javaClass.name}",
+                viaResolver,
+                viaSearch,
+            )
+        }
     }
 
     @Test

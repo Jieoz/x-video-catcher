@@ -48,9 +48,13 @@ class XVideoCatcherModule : IXposedHookLoadPackage {
             object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     runCatching {
+                        // thisObject is the Application; args[0] is its *base* context
+                        // (a ContextImpl). Only the Application declares
+                        // registerActivityLifecycleCallbacks, so these must stay distinct.
+                        val application = param.thisObject
                         val context = param.args[0] as Context
                         appContext = context
-                        install(lpparam.classLoader, context)
+                        install(lpparam.classLoader, context, application)
                     }.onFailure {
                         // Never let a module failure surface as a host crash. A missing entry is
                         // recoverable by the user; X dying on launch is not.
@@ -63,7 +67,7 @@ class XVideoCatcherModule : IXposedHookLoadPackage {
         )
     }
 
-    private fun install(classLoader: ClassLoader, context: Context) {
+    private fun install(classLoader: ClassLoader, context: Context, application: Any) {
         val hostVersion = runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
         }.getOrNull()
@@ -75,7 +79,7 @@ class XVideoCatcherModule : IXposedHookLoadPackage {
         // Start foreground tracking before any share hook can fire. The tweet detail screen resumes
         // long before the sheet opens, so a tracker installed at share time would have missed the
         // event that identifies it.
-        HostActivity.track(context)
+        HostActivity.track(application)
 
         DiagLog.line("module ${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
         DiagLog.line("host $hostVersion, anchors read from ${HostClasses.VERIFIED_HOST_VERSION}")

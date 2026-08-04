@@ -271,6 +271,11 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
                     "(visits=${outcome.visits} exhausted=${outcome.exhausted} " +
                     "roots=${roots.size})",
             )
+            // Which packages the walk actually saw. When the predicate recognises nothing, this is
+            // the only thing separating "wrong anchor" from "tweet not reachable".
+            outcome.census.forEach { (pkg, n) ->
+                DiagLog.line("${ProbeMarkers.CENSUS} $pkg=$n")
+            }
             dumpFields(holder)
             return
         }

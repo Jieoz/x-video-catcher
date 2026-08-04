@@ -199,6 +199,13 @@ jobs:
           check() {
             python3 "$GITHUB_WORKSPACE/tools/dexcheck.py" "$1" "$2" classes*.dex
           }
+          # Negative self-test: a checker that always passes is indistinguishable from a passing
+          # gate. A fabricated method must be reported missing before any real assertion is trusted.
+          if python3 "$GITHUB_WORKSPACE/tools/dexcheck.py" \
+               DownloadTarget definitelyNotARealMethodName classes*.dex >/dev/null 2>&1; then
+            echo "dexcheck accepted a fabricated method -- the gate proves nothing" >&2
+            exit 1
+          fi
           check DownloadTarget photoSpec,videoSpec
           check MediaSaver save
           check HostDownloader download
@@ -207,6 +214,18 @@ jobs:
           # confirms the anchors are on the tap path, so asserting ShareSheetInjector here would
           # gate on a class this build deliberately does not contain.
           check SharePathProbe install
+          # The search that replaced SharePathProbe's single-level field lookup. Its absence would
+          # leave the probe reporting "no tweet candidate" from every dispatch -- which is precisely
+          # the symptom it was written to eliminate, so it would read as a host change.
+          check TweetSearch find
+          # Foreground-activity tracking, one of the three search roots. 1.7.0 shipped this class
+          # while passing it a ContextImpl, so it silently never registered; the guard that now
+          # reports that mistake is only useful if the class is actually in the APK.
+          check HostActivity track,current
+          # The marker vocabulary the README documents and CI cross-checks. If this class is absent
+          # the log still prints, but every marker string becomes an inline literal again and the
+          # README gate loses the identifiers it compares against.
+          check ProbeMarkers getALL
           # The diagnostic log is the only way a user can see why the entry did not appear —
           # the module has no UI of its own, so if these are missing the fallback is telling
           # someone to attach a computer and read logcat.
@@ -272,6 +291,13 @@ jobs:
 
       # The marker gate went green the moment the constants were adopted, which is when a gate is
       # least trustworthy. This ablates each axis it claims to cover.
+      - name: Prove the tweet-search gates can fail
+        # Reverts each search behaviour one at a time and requires the suite to go red. A missing
+        # anchor is reported as a failure, not a pass: an ablation that edits nothing proves nothing,
+        # which is how this script's anchors rotted unnoticed while it lived outside CI.
+        run: |
+          python3 "$GITHUB_WORKSPACE/tools/ablate_search.py"
+
       - name: Prove the marker gate is load-bearing
         run: |
           set -euo pipefail

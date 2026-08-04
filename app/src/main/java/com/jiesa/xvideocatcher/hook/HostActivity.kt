@@ -42,6 +42,15 @@ internal object HostActivity {
     fun track(application: Any) {
         if (registered) return
         val appClass = application.javaClass
+
+        // Reject the wrong argument explicitly. 1.7.0-probe was handed a ContextImpl here and the
+        // only symptom was a NoSuchMethodException from the lookup below, which reads like a
+        // platform restriction rather than a caller bug. Name the class instead.
+        if (!isApplication(appClass)) {
+            DiagLog.line("PROBE activity tracking needs an Application, got ${appClass.name}")
+            return
+        }
+
         val callbacksInterface = appClass.classLoader
             ?.loadClass("android.app.Application\$ActivityLifecycleCallbacks")
             ?: return
@@ -64,6 +73,16 @@ internal object HostActivity {
                 .invoke(application, proxy)
             registered = true
         }.onFailure { DiagLog.line("PROBE activity tracking unavailable: $it") }
+    }
+
+    /** Whether [cls] is android.app.Application or a subclass, walking without a framework dep. */
+    private fun isApplication(cls: Class<*>): Boolean {
+        var c: Class<*>? = cls
+        while (c != null) {
+            if (c.name == "android.app.Application") return true
+            c = c.superclass
+        }
+        return false
     }
 
     /** The foreground activity, or null if none has resumed yet or it has been collected. */

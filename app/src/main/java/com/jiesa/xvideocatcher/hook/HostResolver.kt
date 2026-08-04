@@ -233,8 +233,42 @@ internal object HostResolver {
      * does not move it out of its package. Enums are excluded because the media-type enum lives in
      * the same package tree and is not a tweet.
      */
-    fun isTweetModel(type: Class<*>): Boolean =
-        type.name.startsWith(TWEET_MODEL_PACKAGE) && !type.isEnum
+    fun isTweetModel(type: Class<*>): Boolean {
+        // Structural, deliberately. Four releases of this module died on a hard-coded host
+        // coordinate (1.2-1.4 on class names, 1.7 on a package prefix that the device does not
+        // have). A class that declares media entities is a tweet model wherever X decides to keep
+        // it next.
+        if (type.isEnum || type.isPrimitive || type.isArray) return false
+        return holdsMediaEntities(type)
+    }
+
+    /**
+     * Whether [type] declares a field that can hold host media entities.
+     *
+     * The package-independent half of the predicate. A class carrying media entities -- directly or
+     * as a collection of them -- is a tweet model whatever its package is called, which is what lets
+     * this survive the kind of package move that silenced the prefix check on 12.13.0-release.0.
+     *
+     * Only declared fields of the class and its superclasses are considered, one level deep: this
+     * answers "is this a tweet model", not "can a tweet be reached from here", and those must stay
+     * different questions. Making it recursive would match any object with a tweet somewhere below
+     * it, i.e. almost everything.
+     */
+    private fun holdsMediaEntities(type: Class<*>): Boolean {
+        var cls: Class<*>? = type
+        while (cls != null && cls != Any::class.java) {
+            for (f in cls.declaredFields) {
+                if (Modifier.isStatic(f.modifiers)) continue
+                if (MEDIA_ENTITY_PACKAGES.any { f.type.name.startsWith(it) }) return true
+                // Media usually arrives as a List/Set of entities, whose element type is erased at
+                // runtime, so read it off the generic signature instead.
+                val generic = runCatching { f.genericType.toString() }.getOrDefault("")
+                if (MEDIA_ENTITY_PACKAGES.any { generic.contains(it) }) return true
+            }
+            cls = cls.superclass
+        }
+        return false
+    }
 
     /**
      * The field holding a tweet, searched up [start]'s superclass chain.
@@ -310,5 +344,10 @@ internal object HostResolver {
     private const val DRAWABLE = "android.graphics.drawable.Drawable"
     private const val PACKAGE_MANAGER = "android.content.pm.PackageManager"
     private const val COMPOSE_VIEW = "androidx.compose.ui.platform.ComposeView"
-    private const val TWEET_MODEL_PACKAGE = "com.twitter.model.core."
+    /** Packages whose classes are media entities, used for the shape half of the predicate. */
+    private val MEDIA_ENTITY_PACKAGES = listOf(
+        "com.x.models.media",
+        "com.twitter.model.core.entity",
+        "com.twitter.media.av.model",
+    )
 }

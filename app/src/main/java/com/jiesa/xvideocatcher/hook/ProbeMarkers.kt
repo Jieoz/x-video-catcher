@@ -46,6 +46,9 @@ internal object ProbeMarkers {
     /** The search found nothing from any root. */
     const val NO_CANDIDATE = "NO tweet candidate"
 
+    /** Package histogram of a completed walk, printed only when no candidate was found. */
+    const val CENSUS = "PROBE     census"
+
     /** A tweet model was reported to the extractor. */
     const val TWEET_FOUND = "PROBE   TWEET FOUND at"
 
@@ -61,7 +64,7 @@ internal object ProbeMarkers {
     /** Every marker, for the README cross-check. */
     val ALL: List<String> = listOf(
         RESOLVE, HOOK_FAILED, ROWS_BUILT, LIST_MUTABLE, ACTION, RECEIVER,
-        CANDIDATES, CANDIDATE_PATH, NO_CANDIDATE, TWEET_FOUND, MEDIA_EXTRACTED,
+        CANDIDATES, CANDIDATE_PATH, NO_CANDIDATE, CENSUS, TWEET_FOUND, MEDIA_EXTRACTED,
         SHEET_OPENED, PROBE_ERROR,
     )
 }

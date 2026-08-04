@@ -52,6 +52,14 @@ internal object TweetSearch {
         val candidates: List<Candidate>,
         val visits: Int,
         val exhausted: Boolean,
+        /**
+         * Object count per two-segment package prefix, most frequent first.
+         *
+         * Diagnostic only -- nothing in the search reads this. It exists because a package-prefix
+         * predicate matching nothing looks exactly like a graph holding no tweet, and on a device we
+         * cannot attach a debugger to, that ambiguity costs a release each time.
+         */
+        val census: List<Pair<String, Int>> = emptyList(),
     )
 
     /**
@@ -65,6 +73,7 @@ internal object TweetSearch {
     fun find(roots: List<Pair<String, Any?>>): Outcome {
         val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Any, Boolean>())
         val found = mutableListOf<Candidate>()
+        val census = HashMap<String, Int>()
         var visits = 0
 
         var frontier = roots.mapNotNull { (name, value) -> value?.let { name to it } }
@@ -75,12 +84,15 @@ internal object TweetSearch {
             for ((path, node) in frontier) {
                 if (!seen.add(node)) continue
                 if (++visits > MAX_VISITS) {
-                    return Outcome(found, visits, exhausted = true)
+                    return Outcome(found, visits, exhausted = true, census = packageCensus(census))
                 }
+                val prefix = packagePrefix(node.javaClass.name)
+                census[prefix] = (census[prefix] ?: 0) + 1
 
                 if (HostResolver.isTweetModel(node.javaClass)) {
                     found.add(Candidate(node, path, depth))
-                    if (found.size >= MAX_CANDIDATES) return Outcome(found, visits, false)
+                    if (found.size >= MAX_CANDIDATES)
+                        return Outcome(found, visits, false, packageCensus(census))
                     // Do not descend into a candidate: its own fields are the tweet's internals,
                     // and a quoted tweet hanging off it is a different tweet, reported separately
                     // if it is reachable another way.
@@ -93,7 +105,7 @@ internal object TweetSearch {
             frontier = next
             depth++
         }
-        return Outcome(found, visits, exhausted = false)
+        return Outcome(found, visits, exhausted = false, census = packageCensus(census))
     }
 
     /** Children worth walking, labelled for the path report. */
@@ -156,3 +168,22 @@ internal object TweetSearch {
     /** Per-container element cap: a timeline list is long and the shared tweet is near its head. */
     private const val MAX_FANOUT = 64
 }
+
+/** First three segments of a class name, e.g. `com.x.models` -- `com.x` alone merges unrelated trees. */
+internal fun packagePrefix(className: String): String {
+    var seen = 0
+    for ((i, ch) in className.withIndex()) {
+        if (ch == '.') {
+            seen++
+            if (seen == 3) return className.substring(0, i)
+        }
+    }
+    return className
+}
+
+/** [counts] as a descending list, ties broken by name so the log is stable between runs. */
+internal fun packageCensus(counts: Map<String, Int>, limit: Int = 12): List<Pair<String, Int>> =
+    counts.entries
+        .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+        .take(limit)
+        .map { it.key to it.value }
