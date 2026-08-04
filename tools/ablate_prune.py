@@ -16,14 +16,18 @@ Run inside the android-builder container against a real gradle run. Restores the
 even on failure, so a crash cannot leave the tree ablated.
 """
 import pathlib
+import tempfile
 import re
 import shutil
 import subprocess
 import sys
 
-REPO = pathlib.Path("/workspace/tmp/xvc-standalone")
+# Derived, not hardcoded: a literal path is only valid on the machine that wrote it, and CI failed
+# with FileNotFoundError on exactly that mistake. Same form ablate_search.py already uses.
+REPO = pathlib.Path(__file__).resolve().parent.parent
 SRC = REPO / "app/src/main/java/com/jiesa/xvideocatcher/hook/TweetSearch.kt"
-BACKUP = pathlib.Path("/tmp/TweetSearch.kt.ablate-backup")
+# A fixed /tmp name collides when two ablation scripts run at once and survives a crash.
+BACKUP = pathlib.Path(tempfile.mkdtemp(prefix="ablate-")) / "TweetSearch.kt"
 
 PRUNE_BLOCK = """                if (isInjectionPlumbing(node.javaClass)) {
                     val p = packagePrefix(node.javaClass.name)
