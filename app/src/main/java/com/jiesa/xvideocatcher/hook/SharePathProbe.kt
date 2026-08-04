@@ -263,6 +263,14 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
 
         HostActivity.current()?.let { roots.add("activity:${it.javaClass.simpleName}" to it) }
 
+        // Which roots, concretely. The count alone hid whether HostActivity captured the tweet
+        // detail screen or something else entirely -- on 20260804 that was unknowable from the log.
+        for ((name, value) in roots) {
+            DiagLog.line(
+                "${ProbeMarkers.ROOT} $name = ${value?.javaClass?.name ?: "null"}",
+            )
+        }
+
         val outcome = TweetSearch.find(roots)
 
         if (outcome.candidates.isEmpty()) {
@@ -275,6 +283,11 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
             // the only thing separating "wrong anchor" from "tweet not reachable".
             outcome.census.forEach { (pkg, n) ->
                 DiagLog.line("${ProbeMarkers.CENSUS} $pkg=$n")
+            }
+            // Refused subtrees. An empty report here with a full census means the prune is not
+            // matching what the device actually holds.
+            outcome.pruned.forEach { (pkg, n) ->
+                DiagLog.line("${ProbeMarkers.PRUNED} $pkg=$n")
             }
             dumpFields(holder)
             return

@@ -49,6 +49,12 @@ internal object ProbeMarkers {
     /** Package histogram of a completed walk, printed only when no candidate was found. */
     const val CENSUS = "PROBE     census"
 
+    /** What the walk refused to enter as DI plumbing. Proves the pruning ran. */
+    const val PRUNED = "PROBE     pruned"
+
+    /** One search root and its concrete class, so a wrong root is distinguishable from a starved one. */
+    const val ROOT = "PROBE   root"
+
     /** A tweet model was reported to the extractor. */
     const val TWEET_FOUND = "PROBE   TWEET FOUND at"
 
@@ -64,7 +70,7 @@ internal object ProbeMarkers {
     /** Every marker, for the README cross-check. */
     val ALL: List<String> = listOf(
         RESOLVE, HOOK_FAILED, ROWS_BUILT, LIST_MUTABLE, ACTION, RECEIVER,
-        CANDIDATES, CANDIDATE_PATH, NO_CANDIDATE, CENSUS, TWEET_FOUND, MEDIA_EXTRACTED,
+        CANDIDATES, CANDIDATE_PATH, NO_CANDIDATE, CENSUS, PRUNED, ROOT, TWEET_FOUND, MEDIA_EXTRACTED,
         SHEET_OPENED, PROBE_ERROR,
     )
 }

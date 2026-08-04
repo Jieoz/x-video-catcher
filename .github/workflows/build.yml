@@ -296,6 +296,26 @@ jobs:
           set -euo pipefail
           python3 "$GITHUB_WORKSPACE/tools/ablate_markers.py"
 
+      # Refusing the DI graph and not spending depth on containers are separate failures -- the
+      # device could suffer either -- so they get separate suites and separate ablations. Both are
+      # here rather than run by hand: ablate_search.py's anchors rotted unnoticed precisely because
+      # it lived outside CI.
+      - name: Prove the injection prune is load-bearing
+        # Removing the prune must turn the visit-cost assertion red. Three earlier versions of that
+        # test were unfalsifiable -- they tried to observe budget starvation from a baseline where a
+        # working prune means starvation never happens.
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/tools/ablate_prune.py"
+
+      - name: Prove container transparency is load-bearing
+        # Includes the axis for a regression this fix introduced: bounding how much nesting is
+        # collapsed must not DELETE a path. The first version returned empty past the bound and made
+        # a five-deep nesting unreachable that the previous walk found.
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/tools/ablate_depth.py"
+
       - name: Verify anchors against a host APK
         if: hashFiles('host/**/*.apk') != ''
         run: |

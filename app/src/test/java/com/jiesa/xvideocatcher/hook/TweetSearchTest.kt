@@ -48,8 +48,12 @@ class TweetSearchTest {
         assertEquals(tweet, outcome.candidates[0].value)
         // The path is the diagnostic payload: it is what lets the next build reach the tweet
         // directly instead of searching, so it has to name every hop.
-        assertEquals("vm.state.items.[0].tweet", outcome.candidates[0].path)
-        assertEquals(4, outcome.candidates[0].depth)
+        //
+        // `items[0]` rather than `items.[0]`: a container is transparent to the walk, so the index
+        // is part of the field it indexes rather than a hop of its own. The depth below drops by
+        // one for the same reason -- the list no longer costs a level of MAX_DEPTH.
+        assertEquals("vm.state.items[0].tweet", outcome.candidates[0].path)
+        assertEquals(3, outcome.candidates[0].depth)
     }
 
     @Test

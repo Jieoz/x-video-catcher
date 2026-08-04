@@ -239,6 +239,8 @@ The log answers the questions worth asking, in order:
 | **`PROBE action …`** | **A key line.** A tap was dispatched and reached this module, naming the row chosen |
 | `PROBE   <where> receiver=` … | The class the tweet is being looked for on, at each live hook |
 | `PROBE     census <pkg>=<n>` | Package histogram of the objects a failed walk examined. Printed only when nothing was found, and it is what separates "the predicate recognised nothing" from "the tweet is not reachable from here" |
+| `PROBE     pruned <pkg>=<n>` | Objects refused as dependency-injection plumbing. The 1.8.0 device log spent roughly a quarter of its visit budget inside `dagger.internal`, so a full census with an empty `pruned` report means the refusal is not matching what the host actually holds |
+| `PROBE   root <name> = <class>` | One search root and its concrete class. `roots=3` alone never said *which* activity was captured, which made a wrong starting point indistinguishable from a starved budget |
 | `PROBE   TWEET FOUND at …` | Emitted per candidate by the reporter, after the search names it. On 1.6.0-probe this never appeared (`TWEET FOUND: 0`), which is what motivated searching beyond one level |
 | **`candidate(s)`** — full line `PROBE   <where> N candidate(s) visits=… exhausted=…` | **A key line.** Tweet models are reachable from a hook that fires, with the search cost. `exhausted=true` means the visit budget ran out, which is a different finding from a clean miss and must not be read as one |
 | **`PROBE     [`** — full line `PROBE     [n] depth=… <class> @ <path>` | **The payload.** One line per candidate, naming the field path walked to reach it. This is what lets the shipping build read the tweet directly instead of searching on every tap |
