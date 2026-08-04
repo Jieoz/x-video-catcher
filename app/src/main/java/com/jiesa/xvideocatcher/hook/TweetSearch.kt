@@ -74,25 +74,47 @@ internal object TweetSearch {
      * Breadth-first search for tweet models reachable from any of [roots].
      *
      * Level-synchronous across all roots at once, so "nearest" is nearest globally rather than
-     * nearest within whichever root happened to be searched first. [roots] share one visit budget
+     * nearest within whichever root happened to be searched first.
+     *
+     * [maxVisits] and [maxDepth] default to the UI-thread budget. They are parameters so the
+     * diagnostic sweep can run the shipping traversal at a size a share tap cannot afford,
+     * rather than a second copy of it that would prove nothing about this code. [roots] share one visit budget
      * and [Outcome.exhausted] reports when it ran out, so a wasteful early root cannot silently
      * starve a later one.
      */
-    fun find(roots: List<Pair<String, Any?>>): Outcome {
+    fun find(
+        roots: List<Pair<String, Any?>>,
+        maxVisits: Int = MAX_VISITS,
+        maxDepth: Int = MAX_DEPTH,
+    ): Outcome {
         val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Any, Boolean>())
         val found = mutableListOf<Candidate>()
         val census = HashMap<String, Int>()
         val pruned = HashMap<String, Int>()
         var visits = 0
 
-        var frontier = roots.mapNotNull { (name, value) -> value?.let { name to it } }
+        // Roots get the same refusal as children. A caller can hand this a DI wrapper directly --
+        // the probe's receiver is whatever object the host dispatched from -- and walking one costs
+        // hundreds of visits for a subtree that cannot hold request state. Counted in `pruned`, so
+        // a root that was refused is visible rather than looking like an empty graph.
+        var frontier = roots.mapNotNull { (name, value) ->
+            value?.let {
+                if (isInjectionPlumbing(it.javaClass)) {
+                    val p = packagePrefix(it.javaClass.name)
+                    pruned[p] = (pruned[p] ?: 0) + 1
+                    null
+                } else {
+                    name to it
+                }
+            }
+        }
         var depth = 0
 
-        while (frontier.isNotEmpty() && depth <= MAX_DEPTH) {
+        while (frontier.isNotEmpty() && depth <= maxDepth) {
             val next = mutableListOf<Pair<String, Any>>()
             for ((path, node) in frontier) {
                 if (!seen.add(node)) continue
-                if (++visits > MAX_VISITS) {
+                if (++visits > maxVisits) {
                     return Outcome(
                         found, visits, exhausted = true,
                         census = packageCensus(census), pruned = packageCensus(pruned),
@@ -114,18 +136,24 @@ internal object TweetSearch {
                     continue
                 }
 
-                if (depth == MAX_DEPTH) continue
+                if (depth == maxDepth) continue
 
                 // A DI provider is a hub to the entire application singleton graph. Walking one
                 // costs hundreds of visits and cannot pay out, because a tweet is request state,
-                // never an injected singleton. Counted, not silently dropped.
-                if (isInjectionPlumbing(node.javaClass)) {
-                    val p = packagePrefix(node.javaClass.name)
-                    pruned[p] = (pruned[p] ?: 0) + 1
-                    continue
+                // never an injected singleton.
+                //
+                // Refused here, as a child, rather than on arrival: charging a visit for an object
+                // we have already decided not to walk spent 28% of the budget on 20260804, where
+                // `census dagger.internal.d` and `pruned dagger.internal.d` were both 967. Counted
+                // in `pruned` either way, so a prune that matches nothing is still visible.
+                for ((label, child) in childrenOf(node)) {
+                    if (isInjectionPlumbing(child.javaClass)) {
+                        val p = packagePrefix(child.javaClass.name)
+                        pruned[p] = (pruned[p] ?: 0) + 1
+                        continue
+                    }
+                    next.add("$path.$label" to child)
                 }
-
-                for ((label, child) in childrenOf(node)) next.add("$path.$label" to child)
             }
             frontier = next
             depth++

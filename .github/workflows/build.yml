@@ -235,7 +235,12 @@ jobs:
           # since proven has zero call sites in the shipped app -- the reason three releases hooked
           # successfully and did nothing. dispatchPoints is the replacement, and is validated
           # against the host APK by the reachability gate rather than by name.
-          check HostResolver rowClass,rowProvider,actionClass,dispatchPoints,sheetOpen,tweetFieldIn
+          # The predicate entry point. Every release that shipped a broken predicate reported
+          # "no tweet candidate", which reads as a host change rather than a module bug, so its
+          # absence has to fail here instead of on a device. Only the internal entry point is
+          # listed: the shape helpers below it are private and R8 inlines them, so gating them
+          # would fail a correct build.
+          check HostResolver rowClass,rowProvider,actionClass,dispatchPoints,sheetOpen,tweetFieldIn,isTweetModel
 
       # The checker must be able to fail. A tool that reports success unconditionally is
       # indistinguishable from a passing gate, and this one has already been wrong once
@@ -307,6 +312,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 "$GITHUB_WORKSPACE/tools/ablate_prune.py"
+
+      - name: Prove the tweet predicate is load-bearing
+        # The predicate has expired four times: class names in 1.2-1.4, a package prefix in 1.7, and
+        # a three-package whitelist through 1.9.0 that carried a "structural" comment while being a
+        # package bet. Measured on 20260804: two fixtures of identical shape, differing only in the
+        # media entity's package, got opposite verdicts. Every axis here has to be shown capable of
+        # failing, because a green CriterionTest has already proven worthless once.
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/tools/ablate_criterion.py"
 
       - name: Prove container transparency is load-bearing
         # Includes the axis for a regression this fix introduced: bounding how much nesting is

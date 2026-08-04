@@ -67,10 +67,20 @@ internal object ProbeMarkers {
     /** A probe hook threw and was caught. */
     const val PROBE_ERROR = "ERROR probe"
 
+    /** Prefix for the background deep sweep's verdict. */
+    const val SWEEP = "PROBE   sweep"
+
+    /** Reported when the deep sweep walked the whole graph without finding a tweet. */
+    const val SWEEP_ABSENT = "sweep NO tweet in graph"
+
+    /** Reported when the deep sweep found what the UI-thread search could not reach. */
+    const val SWEEP_FOUND = "sweep TWEET FOUND"
+
     /** Every marker, for the README cross-check. */
     val ALL: List<String> = listOf(
         RESOLVE, HOOK_FAILED, ROWS_BUILT, LIST_MUTABLE, ACTION, RECEIVER,
         CANDIDATES, CANDIDATE_PATH, NO_CANDIDATE, CENSUS, PRUNED, ROOT, TWEET_FOUND, MEDIA_EXTRACTED,
-        SHEET_OPENED, PROBE_ERROR,
+        SHEET_OPENED, PROBE_ERROR, SWEEP, SWEEP_ABSENT, SWEEP_FOUND,
     )
+
 }

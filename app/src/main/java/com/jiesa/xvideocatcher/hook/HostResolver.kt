@@ -259,11 +259,10 @@ internal object HostResolver {
         while (cls != null && cls != Any::class.java) {
             for (f in cls.declaredFields) {
                 if (Modifier.isStatic(f.modifiers)) continue
-                if (MEDIA_ENTITY_PACKAGES.any { f.type.name.startsWith(it) }) return true
+                if (isMediaEntity(f.type)) return true
                 // Media usually arrives as a List/Set of entities, whose element type is erased at
-                // runtime, so read it off the generic signature instead.
-                val generic = runCatching { f.genericType.toString() }.getOrDefault("")
-                if (MEDIA_ENTITY_PACKAGES.any { generic.contains(it) }) return true
+                // runtime, so recover it from the generic signature and test that shape instead.
+                for (arg in typeArgumentsOf(f)) if (isMediaEntity(arg)) return true
             }
             cls = cls.superclass
         }
@@ -271,11 +270,81 @@ internal object HostResolver {
     }
 
     /**
+     * Whether [type] has the shape of a media variant: a URL-ish String plus at least two
+     * numbers.
+     *
+     * Shape rather than package. Every hardcoded host coordinate this module has shipped has
+     * expired -- class names in 1.2-1.4, a package prefix in 1.7, and the three-package
+     * whitelist this replaces, which the 20260804 device log shows matching nothing on
+     * 12.13.0-release.0. What cannot expire is that X's own player needs a URL to fetch and
+     * dimensions or a bitrate to choose between variants, so those fields exist under every
+     * name the class may take.
+     *
+     * Both halves are required. A URL alone matches every config and analytics holder in the
+     * app; numbers alone match every geometry class.
+     */
+    private fun isMediaEntity(type: Class<*>): Boolean {
+        if (type.isEnum || type.isPrimitive || type.isArray) return false
+        if (type.name.startsWith("java.") || type.name.startsWith("kotlin.")) return false
+
+        var cls: Class<*>? = type
+        var url = false
+        var numbers = 0
+        while (cls != null && cls != Any::class.java) {
+            for (f in cls.declaredFields) {
+                if (Modifier.isStatic(f.modifiers)) continue
+                if (f.type == String::class.java && looksLikeUrlField(f.name)) url = true
+                if (isNumeric(f.type)) numbers++
+            }
+            cls = cls.superclass
+        }
+        return url && numbers >= MEDIA_ENTITY_MIN_NUMBERS
+    }
+
+    /**
+     * Whether a field name suggests it holds a media URL.
+     *
+     * Names, unavoidably: a String field is otherwise indistinguishable from any other String.
+     * This is safe where a package whitelist was not, because R8 does not rename fields whose
+     * values cross a serialisation boundary -- these arrive from X's own JSON API, so the names
+     * survive in the release build. The 20260804 log confirms it: obfuscated classes there still
+     * expose readable field names.
+     */
+    private fun looksLikeUrlField(name: String): Boolean {
+        val n = name.lowercase()
+        return URL_FIELD_HINTS.any { n.contains(it) }
+    }
+
+    private fun isNumeric(type: Class<*>): Boolean = type in NUMERIC_TYPES
+
+    /**
+     * Element types named on [f]'s generic signature.
+     *
+     * Reflection erases `List<Entity>` to `List`, so the element type is only recoverable from
+     * the signature. Resolved through the field's own class loader, because the host's classes
+     * are not on this module's.
+     */
+    private fun typeArgumentsOf(f: java.lang.reflect.Field): List<Class<*>> {
+        val generic = f.genericType
+        if (generic !is java.lang.reflect.ParameterizedType) return emptyList()
+        val loader = f.declaringClass.classLoader
+        return generic.actualTypeArguments.mapNotNull { arg ->
+            when (arg) {
+                is Class<*> -> arg
+                is java.lang.reflect.ParameterizedType -> arg.rawType as? Class<*>
+                else -> runCatching {
+                    Class.forName(arg.typeName.substringBefore('<'), false, loader)
+                }.getOrNull()
+            }
+        }
+    }
+
+    /**
      * The field holding a tweet, searched up [start]'s superclass chain.
      *
      * Walking the chain matters: a shareable is typed as a base class with no tweet, and the tweet
-     * sits on the concrete subclass. Matched by package rather than class name, since the model's own
-     * name drifts but its package does not.
+     * sits on the concrete subclass. Matched by the shape of the media it holds, since both the
+     * model's name and its package have drifted across host releases.
      */
     fun tweetFieldIn(start: Class<*>): java.lang.reflect.Field? {
         var cls: Class<*>? = start
@@ -344,10 +413,22 @@ internal object HostResolver {
     private const val DRAWABLE = "android.graphics.drawable.Drawable"
     private const val PACKAGE_MANAGER = "android.content.pm.PackageManager"
     private const val COMPOSE_VIEW = "androidx.compose.ui.platform.ComposeView"
-    /** Packages whose classes are media entities, used for the shape half of the predicate. */
-    private val MEDIA_ENTITY_PACKAGES = listOf(
-        "com.x.models.media",
-        "com.twitter.model.core.entity",
-        "com.twitter.media.av.model",
+    /**
+     * Numeric field count a media entity must reach, alongside its URL.
+     *
+     * Two, because a video variant carries width and height, or a bitrate and one dimension.
+     * One would admit every String+int pair in the app.
+     */
+    private const val MEDIA_ENTITY_MIN_NUMBERS = 2
+
+    /** Substrings that mark a String field as holding a media URL. */
+    private val URL_FIELD_HINTS = listOf("url", "uri", "src", "link")
+
+    /** Field types counted as a media dimension or bitrate, boxed and unboxed. */
+    private val NUMERIC_TYPES = setOf<Class<*>>(
+        Int::class.javaPrimitiveType!!, Int::class.javaObjectType,
+        Long::class.javaPrimitiveType!!, Long::class.javaObjectType,
+        Float::class.javaPrimitiveType!!, Float::class.javaObjectType,
+        Double::class.javaPrimitiveType!!, Double::class.javaObjectType,
     )
 }

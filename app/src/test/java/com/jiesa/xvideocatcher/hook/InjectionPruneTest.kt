@@ -99,15 +99,56 @@ class InjectionPruneTest {
     }
 
     @Test
-    fun `a pruned wrapper still counts as visited`() {
-        // Refusing to descend is not the same as not looking: the node was examined, and hiding
-        // that would make the visit budget under-report what the walk actually touched.
+    fun `a pruned wrapper costs no visit but is still reported`() {
+        // The refusal is charged to `pruned`, not to `visits`. An earlier version of this test
+        // asserted the opposite -- that examining a node costs a visit even when it is refused --
+        // on the reasoning that a cheaper count under-reports the walk. The 20260804 device log
+        // settled it the other way: 1122 of 4001 visits went to objects the walk had already
+        // declined to enter, and `census dagger.internal.d` matched `pruned dagger.internal.d`
+        // exactly. Budget spent on refusals is budget denied to the search.
+        //
+        // What survives from the original intent is that a refusal must be visible somewhere. If
+        // pruning stopped matching, `pruned` would be empty here and this fails -- which is the
+        // signal that separates "prune broken" from "nothing to prune".
         val outcome = TweetSearch.find(
             listOf("root" to dagger.internal.DoubleCheck(junkSubtree(), null)),
         )
 
-        assertEquals(1, outcome.visits)
+        assertEquals("a refused root is not walked", 0, outcome.visits)
+        assertEquals(
+            "the refusal is still accounted for",
+            1,
+            outcome.pruned.toMap()["dagger.internal.DoubleCheck"],
+        )
         assertTrue(outcome.candidates.isEmpty())
+    }
+
+    /**
+     * A wrapper handed in as a root is refused like any other.
+     *
+     * The prune runs at enqueue time, which covers children but says nothing about roots -- and
+     * roots are not hypothetical: the probe passes whatever object the host dispatched from. While
+     * this release moved the prune, roots were briefly left unguarded and a wrapper root had its
+     * entire subtree walked, 586 visits where 1 was expected.
+     *
+     * Separate from the visit-accounting test on purpose. Both would go red together if they shared
+     * an assertion, and then neither would identify which rule broke.
+     */
+    @Test
+    fun `a wrapper passed in as a root is refused`() {
+        val outcome = TweetSearch.find(
+            listOf("root" to dagger.internal.DoubleCheck(junkSubtree(), junkSubtree())),
+        )
+
+        assertTrue(
+            "walking a refused root's subtree costs hundreds of visits; got ${outcome.visits}",
+            outcome.visits < 5,
+        )
+        assertEquals(
+            "the refused root is reported",
+            1,
+            outcome.pruned.toMap()["dagger.internal.DoubleCheck"],
+        )
     }
 
     @Test

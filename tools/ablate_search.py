@@ -28,7 +28,6 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TS = os.path.join(REPO, "app/src/main/java/com/jiesa/xvideocatcher/hook/TweetSearch.kt")
-HR = os.path.join(REPO, "app/src/main/java/com/jiesa/xvideocatcher/hook/HostResolver.kt")
 RESULTS = os.path.join(REPO, "app/build/test-results/testDebugUnitTest")
 
 # Scoped to the classes that own these behaviours, so a failure elsewhere cannot be mistaken for an
@@ -43,14 +42,24 @@ FINAL_RETURN = """        return Outcome(
             census = packageCensus(census), pruned = packageCensus(pruned),
         )"""
 
-OLD_TRAVERSAL = """        var frontier = roots.mapNotNull { (name, value) -> value?.let { name to it } }
+OLD_TRAVERSAL = """        var frontier = roots.mapNotNull { (name, value) ->
+            value?.let {
+                if (isInjectionPlumbing(it.javaClass)) {
+                    val p = packagePrefix(it.javaClass.name)
+                    pruned[p] = (pruned[p] ?: 0) + 1
+                    null
+                } else {
+                    name to it
+                }
+            }
+        }
         var depth = 0
 
-        while (frontier.isNotEmpty() && depth <= MAX_DEPTH) {
+        while (frontier.isNotEmpty() && depth <= maxDepth) {
             val next = mutableListOf<Pair<String, Any>>()
             for ((path, node) in frontier) {
                 if (!seen.add(node)) continue
-                if (++visits > MAX_VISITS) {
+                if (++visits > maxVisits) {
                     return Outcome(
                         found, visits, exhausted = true,
                         census = packageCensus(census), pruned = packageCensus(pruned),
@@ -72,18 +81,24 @@ OLD_TRAVERSAL = """        var frontier = roots.mapNotNull { (name, value) -> va
                     continue
                 }
 
-                if (depth == MAX_DEPTH) continue
+                if (depth == maxDepth) continue
 
                 // A DI provider is a hub to the entire application singleton graph. Walking one
                 // costs hundreds of visits and cannot pay out, because a tweet is request state,
-                // never an injected singleton. Counted, not silently dropped.
-                if (isInjectionPlumbing(node.javaClass)) {
-                    val p = packagePrefix(node.javaClass.name)
-                    pruned[p] = (pruned[p] ?: 0) + 1
-                    continue
+                // never an injected singleton.
+                //
+                // Refused here, as a child, rather than on arrival: charging a visit for an object
+                // we have already decided not to walk spent 28% of the budget on 20260804, where
+                // `census dagger.internal.d` and `pruned dagger.internal.d` were both 967. Counted
+                // in `pruned` either way, so a prune that matches nothing is still visible.
+                for ((label, child) in childrenOf(node)) {
+                    if (isInjectionPlumbing(child.javaClass)) {
+                        val p = packagePrefix(child.javaClass.name)
+                        pruned[p] = (pruned[p] ?: 0) + 1
+                        continue
+                    }
+                    next.add("$path.$label" to child)
                 }
-
-                for ((label, child) in childrenOf(node)) next.add("$path.$label" to child)
             }
             frontier = next
             depth++
@@ -133,6 +148,10 @@ DFS_TRAVERSAL = """        // ablated: depth-first via an explicit stack. Permut
         }"""
 
 ABLATIONS = [
+    # Traversal axes only. Predicate axes live in ablate_criterion.py: `structural predicate` and
+    # `media shape requires a real field` used to sit here and mutated HostResolver, which meant
+    # every rewrite of the predicate drifted this file's anchors -- twice in consecutive releases.
+    # One authoritative suite per subject.
     (
         "depth-first traversal (structural)",
         "nearest-first ordering is what picks the shared tweet over a quoted one",
@@ -144,24 +163,8 @@ ABLATIONS = [
         "visit budget",
         "an unbounded walk would freeze the host UI on a tap",
         TS,
-        "                if (++visits > MAX_VISITS) {",
+        "                if (++visits > maxVisits) {",
         "                if (++visits > Int.MAX_VALUE) {",
-    ),
-    (
-        "structural predicate",
-        "a package prefix is what failed on 12.13.0-release.0",
-        HR,
-        """        if (type.isEnum || type.isPrimitive || type.isArray) return false
-        return holdsMediaEntities(type)""",
-        """        if (type.isEnum || type.isPrimitive || type.isArray) return false
-        return type.name.startsWith("com.twitter.model.core.")""",
-    ),
-    (
-        "media shape requires a real field",
-        "matching on the class name instead of its fields admits anything media-ish",
-        HR,
-        "                if (MEDIA_ENTITY_PACKAGES.any { f.type.name.startsWith(it) }) return true",
-        "                if (cls.name.contains(\"Media\")) return true",
     ),
     (
         "census populated",
@@ -198,11 +201,15 @@ def run_suite():
 
 def main():
     backups = tempfile.mkdtemp(prefix="ablate-search-")
-    for path in {TS, HR}:
+    # Derived from the axes, not hand-listed: an axis added later has its file protected without
+    # anyone remembering to extend a second list. A stale backup set fails silently, which is worse
+    # than a stale anchor -- an anchor announces itself by not matching.
+    targets = {path for _, _, path, _, _ in ABLATIONS}
+    for path in targets:
         shutil.copy2(path, os.path.join(backups, os.path.basename(path)))
 
     def restore():
-        for p in {TS, HR}:
+        for p in targets:
             shutil.copy2(os.path.join(backups, os.path.basename(p)), p)
 
     base_failed, base_total = run_suite()

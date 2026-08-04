@@ -290,6 +290,7 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
                 DiagLog.line("${ProbeMarkers.PRUNED} $pkg=$n")
             }
             dumpFields(holder)
+            deepSweep(where, roots)
             return
         }
 
@@ -304,7 +305,6 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
             reportTweet("$where[$n]", c.value)
         }
     }
-
 
     /** Reports a located tweet and what the production extractor makes of it. */
     private fun reportTweet(path: String, tweet: Any?) {
@@ -353,10 +353,89 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
     }.getOrNull()
 
     private companion object {
+        /**
+         * Visit budget for the background sweep.
+         *
+         * 300k, ~75x the UI budget. Sized to exceed the reachable graph rather than to fit a time
+         * limit: the answer is only worth having if a miss means absence, and a miss under a budget
+         * that ran out means nothing.
+         */
+        private const val SWEEP_VISITS = 300_000
+
+        /**
+         * Hop limit for the background sweep.
+         *
+         * 25 against the UI path's 6. The tweet is expected within a handful of hops of the screen,
+         * but the sweep starts from a share-sheet component and may have to climb the navigation tree
+         * before descending, so the route can be much longer than the direct one.
+         */
+        private const val SWEEP_DEPTH = 25
+
         /** Enough to identify the list without flooding a user's log with every installed app. */
         const val MAX_ROWS_LOGGED = 12
     }
 
     /** Navigation library the share sheet is a child component of. Third-party, so stable. */
     private val DECOMPOSE_PACKAGE = "com.arkivanov.decompose"
+
+    /**
+     * Re-runs the search on a background thread with a budget a share tap cannot afford.
+     *
+     * The point is to make `exhausted` mean something. Every device log so far ends with
+     * `exhausted=true`, and this module's own rule says that permits no conclusion about whether
+     * the tweet is reachable -- so three releases have been unable to tell "the walk stopped early"
+     * from "the tweet is not there". This sweep ends that: it either reports a path, or reports
+     * `exhausted=false`, which is the only evidence that would justify abandoning graph search.
+     *
+     * Off the UI thread because it is deliberately too expensive for one: X's own frame budget is
+     * untouched, and a slow answer is fine for a diagnostic. Roots are captured before the thread
+     * starts, so they are the objects the share actually dispatched from.
+     *
+     * Failures are swallowed and logged. A reflective walk over a live graph on a background thread
+     * can hit a host object mid-mutation, and crashing someone's X client to satisfy a probe is not
+     * a trade worth making.
+     */
+    private fun deepSweep(where: String, roots: List<Pair<String, Any?>>) {
+        Thread {
+            try {
+                val outcome = TweetSearch.find(roots, SWEEP_VISITS, SWEEP_DEPTH)
+                if (outcome.candidates.isEmpty()) {
+                    DiagLog.line(
+                        "${ProbeMarkers.SWEEP} $where ${ProbeMarkers.SWEEP_ABSENT} " +
+                            "(visits=${outcome.visits} exhausted=${outcome.exhausted} " +
+                            "depth<=$SWEEP_DEPTH)",
+                    )
+                    // An exhausted sweep means even this budget was not enough, and the verdict is
+                    // still unknown. Saying so explicitly, because the surrounding line reads like
+                    // an absence proof and on 20260804 that misreading cost a release.
+                    if (outcome.exhausted) {
+                        DiagLog.line(
+                            "${ProbeMarkers.SWEEP} $where budget hit, absence NOT proven",
+                        )
+                    }
+                    return@Thread
+                }
+                DiagLog.line(
+                    "${ProbeMarkers.SWEEP} $where ${ProbeMarkers.SWEEP_FOUND} " +
+                        "(${outcome.candidates.size} candidate(s) visits=${outcome.visits})",
+                )
+                // The path is the deliverable: it is the route a targeted lookup would take, which
+                // is what replaces searching once this answers.
+                for ((n, c) in outcome.candidates.withIndex()) {
+                    DiagLog.line(
+                        "${ProbeMarkers.SWEEP}   [$n] depth=${c.depth} ${c.value.javaClass.name}",
+                    )
+                    DiagLog.line("${ProbeMarkers.SWEEP}       path=${c.path}")
+                }
+            } catch (t: Throwable) {
+                DiagLog.line("${ProbeMarkers.SWEEP} $where failed: ${t.javaClass.simpleName}")
+            }
+        }.apply {
+            name = "xvc-deep-sweep"
+            // Below the UI thread: this must never win a scheduling contest against X's rendering.
+            priority = Thread.MIN_PRIORITY
+            isDaemon = true
+        }.start()
+    }
+
 }
