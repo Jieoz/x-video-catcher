@@ -73,16 +73,29 @@ internal class ShareSheetInjector(
             return
         }
 
-        val actionRoot = HostResolver.actionClass(classLoader, rowClass)
-        val dispatch = if (actionRoot == null) {
-            emptyList()
-        } else {
-            HostResolver.dispatchPoints(classLoader, actionRoot)
+        // actionClass is the *concrete* row-carrying subtype (t$g). Dispatch methods take the
+        // *sealed parent* (t), not the subtype — Kotlin/JVM erases the sealed hierarchy to the
+        // superclass parameter. SharePathProbe already used `action.superclass` and the 1.12
+        // device log proved it: injector searched `(g)->void` and found nothing, while the probe
+        // on the same process reported `dispatch=2 point(s)` for `impl.b.h` and `sharesheet.j.h`.
+        val action = HostResolver.actionClass(classLoader, rowClass)
+        val actionRoot = action?.superclass
+        if (action == null || actionRoot == null || actionRoot == Any::class.java) {
+            DiagLog.line(
+                "$MARK action-root MISS -- action=${action?.name ?: "null"} " +
+                    "super=${action?.superclass?.name ?: "null"}",
+            )
+            DiagLog.flushNow()
+            return
         }
+        val dispatch = HostResolver.dispatchPoints(classLoader, actionRoot)
         if (dispatch.isEmpty()) {
             // Without a tap handler the row would appear and do nothing, which is worse than no row:
             // the user would think the module works and blame the download.
-            DiagLog.line("$MARK dispatch MISS -- row suppressed to avoid a dead entry")
+            DiagLog.line(
+                "$MARK dispatch MISS -- row suppressed " +
+                    "(action=${action.name}, root=${actionRoot.name})",
+            )
             DiagLog.flushNow()
             return
         }
@@ -129,10 +142,15 @@ internal class ShareSheetInjector(
                         return
                     }
 
+                    // best() already prefers a complete progressive MP4 when one exists. Offering
+                    // the row for an HLS-only capture would toast "no media" on tap — worse than
+                    // no row. Device 1.12 log had both master and progressive; progressive wins.
                     val hit = MediaSpy.best()
-                    if (hit == null) {
-                        // Expected for a text-only tweet, and for a video the user has not played.
-                        DiagLog.line(ProbeMarkers.INJECT_NO_MEDIA)
+                    if (hit == null || hit.kind != MediaSpy.Kind.PROGRESSIVE_MP4) {
+                        DiagLog.line(
+                            if (hit == null) ProbeMarkers.INJECT_NO_MEDIA
+                            else "$MARK no downloadable capture (best=${hit.kind})",
+                        )
                         return
                     }
 

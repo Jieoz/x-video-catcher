@@ -8,25 +8,21 @@ Everything runs inside X's process. There is no activity, no service, no backgro
 no launcher icon — the APK exists only to be loaded into X by LSPosed. Installing it and opening
 it does nothing by design; the entry appears in X.
 
-> ### 1.12.0 captures the media from the player, not the tweet
+> ### 1.13.0 puts the download row on the path the probe already proved
 >
-> Versions 1.5–1.11 all tried to reach media through the tweet object on the share path. Device logs
-> for 1.11 ended that family: the live sheet (`com.x.share.impl`) is handed a **status URL**, and
-> every graph walk reported `media extracted: 0 item(s)`. There was no tweet to search.
+> 1.12.0's device log closed two questions and opened one:
 >
-> 1.12.0 reads the URL the host's own media3 player has already resolved. The hook is on
-> `androidx.media3.datasource.DataSpec` (shape-matched; R8 renames it to `j`), which every playback
-> request must construct. The download row is injected into the **live** share sheet the probe
-> actually saw (`com.x.share.impl`), not the unused tweet-action controller that 1.11 selected from
-> static call sites.
->
-> What this build can save today: **progressive MP4** captured from the player. An HLS master or
-> variant is logged (`MEDIASPY HLS_…`) but not written as a playable file yet — that needs a playlist
-> parser, and it is deliberately not pre-built before device evidence shows which kind of URL arrives.
->
-> Diagnostic lines are still written under `Android/data/com.twitter.android/files/xvc-diag-*.txt`
-> (`MEDIASPY …`, inject resolve / no-media, download start/fail). Force-stop X after installing, open
-> a video, share once, then pull the log.
+> 1. **MediaSpy works.** `MEDIASPY armed on androidx.media3.datasource.j.<init>` and real
+>    `video.twimg.com` URLs, including complete progressive files
+>    (`.../vid/avc1/0/0/<WxH>/<id>.mp4`) alongside HLS masters and `.m4s` segments.
+> 2. **The download row never appeared.** The injector called `dispatchPoints` with the concrete
+>    action subtype (`t$g`); the live methods take the sealed parent (`t`). Same process, same
+>    second: probe reported `dispatch=2 point(s)`, injector logged
+>    `FATAL no dispatch (g)->void found` and suppressed the row. 1.13 uses `action.superclass`,
+>    the same root SharePathProbe already used.
+> 3. **What to save.** Prefer the complete progressive `.mp4` over an HLS master when both are
+>    captured; ignore `.m4s` segments (not a playable file on their own). Still no HLS remux —
+>    progressive is present on the measured path.
 
 ## Target
 

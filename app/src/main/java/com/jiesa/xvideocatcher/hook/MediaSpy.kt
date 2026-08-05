@@ -169,7 +169,12 @@ internal object MediaSpy {
             MediaUrls.isMasterPlaylist(url) -> Kind.HLS_MASTER
             MediaUrls.isManifest(url) -> Kind.HLS_VARIANT
             MediaUrls.isPhoto(url) -> Kind.PHOTO
-            MediaUrls.isVideoTrack(url) -> Kind.PROGRESSIVE_MP4
+            // Complete progressive file only. Device 1.12 logs also show fMP4 media segments
+            // (path like /vid/.../0/3000/....m4s) under /vid/; those are pieces of an HLS stream, not a file
+            // the user can play. isVideoTrack accepts them, so the extension is the load-bearing
+            // discriminator between "save this" and "log and ignore".
+            MediaUrls.isVideoTrack(url) && url.substringBefore('?').endsWith(".mp4", ignoreCase = true) ->
+                Kind.PROGRESSIVE_MP4
             else -> null
         }
     }
@@ -180,14 +185,28 @@ internal object MediaSpy {
      * Photos are excluded: they are captured for diagnostics, but the tweet-based path already
      * handles images and picking one here would race it.
      *
-     * A master playlist outranks a progressive file even though the file is simpler to fetch: the
-     * master reaches every resolution, while a progressive URL is whatever the player chose for the
-     * current network. Within a kind the most recent wins -- the user taps download on the video
-     * they are watching.
+     * A complete progressive MP4 outranks playlists: [HostDownloader.downloadCaptured] can save it
+     * today, and the 1.12 device log proved X serves both on the same playback
+     * (`HLS_MASTER` plus a complete progressive .mp4 under /vid/). Preferring the master left the download path with a
+     * non-fetchable URL while a playable file was already in the capture set.
+     *
+     * Within progressive files, higher resolution wins, then recency — the player often opens the
+     * init segment of every rung; the user wants the sharpest complete file seen so far.
      */
     fun best(): Seen? = synchronized(seen) {
         seen.filter { it.kind != Kind.PHOTO }
-            .maxWithOrNull(compareBy<Seen> { RANK.indexOf(it.kind) }.thenBy { it.seenAt })
+            .maxWithOrNull(
+                compareBy<Seen> { RANK.indexOf(it.kind) }
+                    .thenBy { progressiveRank(it) }
+                    .thenBy { it.seenAt },
+            )
+    }
+
+    /** Pixel area for progressive URLs; 0 for everything else so it does not disturb other kinds. */
+    private fun progressiveRank(seen: Seen): Long {
+        if (seen.kind != Kind.PROGRESSIVE_MP4) return 0L
+        val (w, h) = MediaUrls.resolution(seen.url) ?: return 0L
+        return w.toLong() * h.toLong()
     }
 
     /** Everything captured, newest first. Diagnostics only. */
@@ -211,7 +230,8 @@ internal object MediaSpy {
      * `indexOf` returns -1 for a kind absent here, which sorts below everything present. That is
      * the intended fallback rather than a crash if a new kind is added and not ranked.
      */
-    private val RANK = listOf(Kind.HLS_VARIANT, Kind.PROGRESSIVE_MP4, Kind.HLS_MASTER)
+    // Best last: progressive is what downloadCaptured can write; master/variant are diagnostics.
+    private val RANK = listOf(Kind.HLS_VARIANT, Kind.HLS_MASTER, Kind.PROGRESSIVE_MP4)
 
     /**
      * `DataSpec`'s field types in declaration order, as `Class.getName()` spells them.

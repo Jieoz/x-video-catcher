@@ -206,6 +206,36 @@ class SharePathAnchorTest {
 
     // ---- dispatch ---------------------------------------------------------
 
+    /**
+     * The 1.12 device failure: injector passed the concrete action subtype (`t$g`) to
+     * [HostResolver.dispatchPoints], which looks for `(actionRoot)->void`. Live methods take the
+     * sealed parent (`t`). Same process logged `FATAL no dispatch (g)->void found` from the
+     * injector while the probe, using `action.superclass`, reported two live points.
+     *
+     * Passing the subtype must find nothing; the superclass must find the real points. That is the
+     * whole load-bearing distinction — if both find the same set, the 1.12 bug is unmeasurable.
+     */
+    @Test
+    fun `dispatch root is the sealed parent, not the concrete action subtype`() {
+        val row = HostResolver.rowClass(loader)!!
+        val action = HostResolver.actionClass(loader, row)!!
+        val subtypeHits = HostResolver.dispatchPoints(loader, action)
+        val parentHits = HostResolver.dispatchPoints(loader, action.superclass!!)
+        assertTrue(
+            "concrete subtype must not match dispatch signatures — that is the 1.12 injector miss",
+            subtypeHits.isEmpty(),
+        )
+        assertTrue(
+            "sealed parent must resolve the live dispatch points the probe already proved",
+            parentHits.isNotEmpty(),
+        )
+        assertEquals(
+            "both helper and direct parent lookup must agree",
+            parentHits.map { it.method.declaringClass.name }.toSet(),
+            dispatchPoints().map { it.method.declaringClass.name }.toSet(),
+        )
+    }
+
     @Test
     fun `dispatch finds every declaring class, not just one`() {
         val points = dispatchPoints()

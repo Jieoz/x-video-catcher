@@ -161,18 +161,42 @@ class MediaSpyTest {
     // --- ranking
 
     /**
-     * A master playlist outranks a progressive file even though the file is simpler to fetch: the
-     * master reaches every resolution, while a progressive URL is whatever the player picked for the
-     * current network.
+     * Progressive outranks a master: downloadCaptured can save the file today, and the 1.12 device
+     * log captured both on one playback. Preferring the master left the tap with nothing to write.
+     *
+     * Flip RANK so master is last and this must fail.
      */
     @Test
-    fun prefersMasterOverProgressive() {
+    fun prefersProgressiveOverMaster() {
         MediaSpy.clear()
         val mp4 = "https://video.twimg.com/amplify_video/1/vid/avc1/640x360/a.mp4"
         val master = "https://video.twimg.com/amplify_video/1/pl/b.m3u8"
         record(mp4)
         record(master)
-        assertEquals(master, MediaSpy.best()?.url)
+        assertEquals(mp4, MediaSpy.best()?.url)
+    }
+
+    /**
+     * fMP4 media segments share /vid/ with progressive files. Device 1.12 logged them as
+     * PROGRESSIVE_MP4 because isVideoTrack alone matched; they are not a playable download.
+     *
+     * Drop the `.mp4` extension check in classify and this must fail.
+     */
+    @Test
+    fun rejectsFragmentedMediaSegments() {
+        val m4s = "https://video.twimg.com/amplify_video/1/vid/avc1/0/3000/1080x1920/seg.m4s"
+        assertNull(MediaSpy.classify(m4s))
+    }
+
+    /** Among complete progressive files, higher resolution wins (player opens every rung's init). */
+    @Test
+    fun prefersHigherResolutionProgressive() {
+        MediaSpy.clear()
+        val low = "https://video.twimg.com/amplify_video/1/vid/avc1/0/0/320x568/low.mp4"
+        val high = "https://video.twimg.com/amplify_video/1/vid/avc1/0/0/1080x1920/high.mp4"
+        record(low)
+        record(high)
+        assertEquals(high, MediaSpy.best()?.url)
     }
 
     /** Within one kind, the video the user is watching now wins. */
