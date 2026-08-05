@@ -66,6 +66,46 @@ SHARE_IMPL_PKG = "Lcom/x/share/impl/"
 SHARE_ROW_PKG = "Lcom/x/models/share/"
 SHARESHEET_PKG = "Lcom/x/dms/components/sharesheet/"
 
+# --- share-sheet capture chain, measured on 12.13.0-RELEASE.0 (versionCode 312130000) -------
+#
+# Read this before touching the names below.
+#
+# Everything recorded before 20260805 came from the 12.13.0-BETA bundle, and beta and release
+# are obfuscated SEPARATELY. That is what the device log's
+# `com.twitter.model.core.entity.b0 not found` actually meant: channel drift, not a version
+# bump, and not a wrong criterion. Five releases were spent chasing that as a search problem.
+#
+# So the controller is `e0` here where beta had `h0` -- same 15 fields in the same order, with
+# `a` the row list and `b` the tweet wrapper. Its PACKAGE survives obfuscation, which is why it
+# is findable at all; the class letter does not, which is why this gate exists.
+#
+# These stay literal, copied from the release APK, for the same reason every other anchor here
+# is literal: a name derived at runtime cannot drift, and therefore cannot report the next
+# rewrite.
+SHEET_CONTROLLER = "Lcom/twitter/tweet/action/legacy/e0;"
+SHEET_SHOW_METHOD = "h"          # h(FragmentManager) -> void, shows the sheet
+SHEET_ROWS_FIELD = "a"           # java.util.List of sheet rows
+SHEET_TWEET_FIELD = "b"          # the tweet wrapper, i.e. what four releases failed to reach
+TWEET_WRAPPER = "Lcom/twitter/model/core/e;"
+TWEET_BODY = "Lcom/twitter/model/core/d;"
+MEDIA_ENTITY = "Lcom/twitter/model/core/entity/c0;"
+MEDIA_TYPE_ENUM = "Lcom/twitter/model/core/entity/c0$d;"
+VIDEO_INFO = "Lcom/twitter/media/av/model/z;"
+VIDEO_VARIANT = "Lcom/twitter/media/av/model/a0;"
+
+# getId survived R8 on the tweet body, so it is the one lookup key on this chain that is not a
+# single obfuscated letter.
+TWEET_ID_GETTER = "getId"
+
+# Enum.name() must return the real string at runtime, so R8 keeps these constants even while
+# renaming the class that holds them. That is what located the media entity on release, and it
+# is the property this gate leans on rather than any letter.
+MEDIA_TYPE_CONSTANTS = ("VIDEO", "ANIMATED_GIF", "IMAGE")
+
+# The controller's package is unobfuscated. Assert that so a future rename of the package
+# itself -- the one drift that would defeat every letter below -- fails here first.
+SHEET_PKG = "Lcom/twitter/tweet/action/legacy/"
+
 ROW_FIELD_COUNT = 5
 VALUE_TYPE_METHODS = ("equals", "hashCode", "toString")
 
@@ -189,6 +229,147 @@ def analyse(classes):
     return results, failures
 
 
+def _field_type(cls, fname):
+    """Type of instance field ``fname``, or None. Static fields are not host state."""
+    for f in _instance(cls["fields"]):
+        if f["name"] == fname:
+            return f["type"]
+    return None
+
+
+def analyse_capture_chain(classes):
+    """Anchor 7: the share-sheet capture chain. Returns (results, failures).
+
+    Kept separate from ``analyse`` because it answers a different question. ``analyse`` asks
+    whether the Compose share sheet under ``com.x.share.impl`` still looks the way HostResolver
+    expects. This asks whether the tweet can be read directly off the LEGACY sheet controller,
+    which is a different code path in the host -- and the one that actually holds the tweet.
+
+    Four probe releases searched the object graph at share time and never found a tweet, with
+    ``exhausted=false`` proving the walk had drained everything reachable. It was reachable all
+    along, one field off a controller in an unobfuscated package; the searches were rooted in
+    the wrong sheet.
+
+    Every link is asserted rather than printed. The 1.10.0 device log carried
+    ``media entity class com.twitter.model.core.entity.b0 not found`` -- a name recorded from
+    the BETA bundle and never rechecked against release. That is exactly the failure this gate
+    exists to turn red before an APK reaches a phone.
+    """
+    results = {}
+    failures = []
+
+    def need_field(owner, fname, expect, what):
+        cls = classes.get(owner)
+        if cls is None:
+            failures.append("%s: class %s missing from host" % (what, pretty(owner)))
+            return
+        actual = _field_type(cls, fname)
+        if actual is None:
+            failures.append("%s: %s.%s not found" % (what, pretty(owner), fname))
+        elif actual != expect:
+            failures.append("%s: %s.%s is %s, expected %s"
+                            % (what, pretty(owner), fname, pretty(actual), pretty(expect)))
+
+    # The unobfuscated package is what makes the controller findable at all; if it is ever
+    # renamed, every letter below is void, so check it first and say so plainly.
+    if not any(name.startswith(SHEET_PKG) for name in classes):
+        failures.append("capture: package %s absent -- every anchor below is void"
+                        % SHEET_PKG.strip("L;").replace("/", "."))
+
+    # capture -- the sheet controller holds the tweet outright, no search
+    need_field(SHEET_CONTROLLER, SHEET_TWEET_FIELD, TWEET_WRAPPER, "capture")
+    need_field(SHEET_CONTROLLER, SHEET_ROWS_FIELD, "Ljava/util/List;", "sheet rows")
+
+    # the hook point: h(FragmentManager) -> void, called to show the sheet
+    ctrl = classes.get(SHEET_CONTROLLER)
+    if ctrl is None:
+        failures.append("hook point: controller %s missing from host"
+                        % pretty(SHEET_CONTROLLER))
+    elif not any(m["name"] == SHEET_SHOW_METHOD
+                 and m["params"] == ["Landroidx/fragment/app/FragmentManager;"]
+                 and m["ret"] == "V"
+                 for m in ctrl["methods"]):
+        failures.append("hook point: %s.%s(FragmentManager) -> void not found"
+                        % (pretty(SHEET_CONTROLLER), SHEET_SHOW_METHOD))
+
+    # wrapper -> body, and the quoted tweet, which carries its own media
+    need_field(TWEET_WRAPPER, "a", TWEET_BODY, "wrapper")
+    need_field(TWEET_WRAPPER, "c", TWEET_WRAPPER, "quoted tweet")
+
+    # lookup key -- the share URL carries a status id, so capture is useless without this
+    body = classes.get(TWEET_BODY)
+    if body is None:
+        failures.append("lookup key: class %s missing from host" % pretty(TWEET_BODY))
+    elif not any(m["name"] == TWEET_ID_GETTER and m["ret"] == "J" and not m["params"]
+                 for m in body["methods"]):
+        failures.append("lookup key: %s.%s() -> long not found"
+                        % (pretty(TWEET_BODY), TWEET_ID_GETTER))
+
+    # media -- entity carries its type and, for video, the variant list
+    need_field(MEDIA_ENTITY, "p", MEDIA_TYPE_ENUM, "media type")
+    need_field(MEDIA_ENTITY, "r", VIDEO_INFO, "video info")
+    need_field(VIDEO_INFO, "c", "Ljava/util/List;", "variant list")
+    # The variant is where the playable URL actually lives, so its identity has to rest on more
+    # than the bitrate: av/model/b0 on this build is (int a, int b, int c) and would satisfy a
+    # bitrate-only assertion while carrying no URL at all. Requiring the String alongside is what
+    # makes a rename of this class detectable -- the ablation proved the bitrate alone was not.
+    need_field(VIDEO_VARIANT, "a", "I", "variant bitrate")
+    need_field(VIDEO_VARIANT, "b", "Ljava/lang/String;", "variant url")
+
+    enum = classes.get(MEDIA_TYPE_ENUM)
+    if enum is None:
+        failures.append("media type: enum %s missing from host" % pretty(MEDIA_TYPE_ENUM))
+    else:
+        consts = {f["name"] for f in enum["fields"]
+                  if f["static"] and f["type"] == MEDIA_TYPE_ENUM}
+        missing = [c for c in MEDIA_TYPE_CONSTANTS if c not in consts]
+        if missing:
+            failures.append("media type: %s missing constant(s) %s"
+                            % (pretty(MEDIA_TYPE_ENUM), missing))
+        results["media_types"] = sorted(consts)
+
+    results["capture_chain"] = [SHEET_CONTROLLER, TWEET_WRAPPER, TWEET_BODY, MEDIA_ENTITY]
+    return results, failures
+
+
+def check_capture_reachability(apk):
+    """Prove the hook point is live code, not a shape that happens to hold a tweet.
+
+    Shape cannot detect unreachability -- the lesson 1.2 through 1.4 paid for, when anchors
+    matched a class nobody ever ran. The sheet controller is reached by being *constructed* and
+    its show method by being *called*, so both halves are checked: something builds the
+    controller, and something invokes the method being hooked.
+
+    A hook on a method no caller reaches is silent at runtime and looks identical to a hook that
+    simply never fired, which is the failure mode this rules out before shipping.
+
+    Returns ``(sites, failures)`` where sites is the full list of constructing classes.
+    """
+    try:
+        built = find_instantiations(apk, [SHEET_CONTROLLER])
+    except ScanError as exc:
+        return [], ["capture chain: instruction scan failed: %s" % exc]
+
+    sites = sorted(set(built.get(SHEET_CONTROLLER, [])))
+    if not sites:
+        return sites, ["capture chain: %s is never constructed, so hooking it can never fire"
+                       % pretty(SHEET_CONTROLLER)]
+
+    # The method being hooked must have a caller; otherwise the hook is dead on arrival.
+    try:
+        callers = find_callers(apk, [(SHEET_CONTROLLER, SHEET_SHOW_METHOD)])
+    except ScanError as exc:
+        return sites, ["capture chain: caller scan failed: %s" % exc]
+
+    show_callers = sorted(set(callers.get((SHEET_CONTROLLER, SHEET_SHOW_METHOD), [])))
+    if not show_callers:
+        return sites, [
+            "capture chain: %s.%s has no call sites -- a hook there would never run"
+            % (pretty(SHEET_CONTROLLER), SHEET_SHOW_METHOD)
+        ]
+    return sites, []
+
+
 def supertypes(classes, name, seen=None):
     """``name`` plus every superclass and interface reachable from it, nearest first."""
     if seen is None:
@@ -269,6 +450,11 @@ def check_reachability(apk, results, classes=None):
     for cls in results.get("row", []):
         add("row model %s" % pretty(cls), cls, None)
 
+    # The sheet controller: method=None asks only "is this type referenced". The dedicated
+    # check_capture_reachability pass is what proves the hook point has real callers.
+    for cls in results.get("capture_chain", [])[:1]:
+        add("sheet controller %s" % pretty(cls), cls, None)
+
     if not anchors:
         return {}, ["nothing to check for reachability — shape half found no anchors"]
 
@@ -344,6 +530,16 @@ def report(results, failures, counts=None, reach_failures=()):
         print("[dispatch] %s.%s" % (pretty(cls), meth))
     for cls, hits in sorted(results.get("tweets", {}).items())[:5]:
         print("[tweet]    %s -> %s" % (pretty(cls), hits))
+
+    chain = results.get("capture_chain")
+    if chain:
+        print("[capture]  %s.%s -> %s.a -> %s.%s()"
+              % (pretty(chain[0]), SHEET_TWEET_FIELD, pretty(chain[1]), pretty(chain[2]),
+                 TWEET_ID_GETTER))
+        print("[capture]  hook %s.%s(FragmentManager)" % (pretty(chain[0]), SHEET_SHOW_METHOD))
+        print("[capture]  media %s type=%s" % (pretty(chain[3]), results.get("media_types", [])))
+    for site in results.get("capture_sites", [])[:8]:
+        print("[capture]  built by %s" % site)
 
     if counts:
         print()
@@ -692,6 +888,17 @@ def main():
     print("[parse] %d classes in %.1fs\n" % (len(classes), time.time() - t0))
 
     results, failures = analyse(classes)
+
+    # Anchor 7 runs regardless of the Compose share-sheet verdict: it is a different code path
+    # in the host, and it is the one the next release actually depends on.
+    capture, capture_failures = analyse_capture_chain(classes)
+    results.update(capture)
+    failures.extend(capture_failures)
+
+    if not capture_failures:
+        sites, reach = check_capture_reachability(apk)
+        results["capture_sites"] = sites
+        failures.extend(reach)
 
     # Reachability is only meaningful once shapes resolved; if they did not, the shape failure is the
     # actionable one and a scan would just add noise.

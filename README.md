@@ -97,6 +97,37 @@ Reading one rendition avoids field names entirely — the URL is the `https://` 
 MIME type, and the bitrate is the class's only int. Every resolver returns null rather than
 throwing.
 
+## Where the tweet comes from
+
+The sheet controller hands it over directly. `com.twitter.tweet.action.legacy.e0` holds the row
+list in field `a` and the tweet wrapper in field `b`, and `e0.h(FragmentManager)` is called to show
+the sheet — so the hook that adds the row is already holding the tweet:
+
+```
+com.twitter.tweet.action.legacy.e0     .b -> tweet wrapper   (.a = row list, .h(FragmentManager) = show)
+  com.twitter.model.core.e             .a -> body   .c -> quoted tweet (own media)
+    com.twitter.model.core.d           .getId() -> long        <- survived R8 unrenamed
+      com.twitter.model.core.entity.c0 .p -> type enum   .r -> video info
+        com.twitter.media.av.model.z   .c -> variant list
+          com.twitter.media.av.model.a0 .a = bitrate   .b = url
+```
+
+Worth stating plainly, because four probe releases were spent on the alternative: **no search is
+needed.** Versions 1.7.0 through 1.10.0 walked the object graph at share time looking for a tweet,
+budgeted the walk, pruned it, then relaxed the predicate — and 1.10.0 reported
+`visits=291 exhausted=false`, meaning it had drained everything reachable and found nothing. That
+was read as proof the tweet was unreachable. It was reachable the whole time; the walk was rooted
+in the Compose sheet (`com.x.share.impl`) while the tweet sits one field off the *legacy*
+controller. The lesson is not about budgets: an exhaustive negative result only ever tells you
+about the roots you started from.
+
+`com.twitter.share.api.m` also carries the same wrapper type in field `b`, so the modern path has
+an equivalent holder if the legacy controller is ever retired.
+
+The package `com.twitter.tweet.action.legacy` is not obfuscated, which is what makes the controller
+findable at all; the class letter is (`e0` on release, `h0` on beta). `tools/verify_host_anchors.py`
+asserts the package explicitly, because a rename there voids every letter below it.
+
 ## Design decisions that are not the obvious ones
 
 **The tap is caught by sentinel id, not by hooking a click listener.** The listener class is
@@ -279,8 +310,13 @@ It is a second copy, not the primary path.
 
 ## Limits
 
-- **Anchored to X 12.13.0-beta.0.** Shape lookups absorb renames; a structural redesign of the
-  share sheet would need new anchors. The install log makes that case visible.
+- **Anchored to X 12.13.0-release.0** (`versionCode` 312130000), verified against that exact APK.
+  Earlier releases were anchored to 12.13.0-**beta**.0 while the device ran release, and the two
+  channels are obfuscated separately: the beta media entity is `entity.b0`, the release one is
+  `entity.c0`. That mismatch is what the device reported as
+  `com.twitter.model.core.entity.b0 not found`, and it was misread for four releases as a search
+  problem. A shape lookup absorbs field renames; it cannot absorb being pointed at the wrong
+  build. `tools/verify_host_anchors.py <apk>` is the check that settles it.
 - **`ANIMATED_GIF` is handled as video** (X serves GIFs as MP4). `MODEL3D` and unknown types are
   skipped rather than guessed at.
 - **Highest bitrate, not highest resolution.** For X's progressive renditions these coincide;

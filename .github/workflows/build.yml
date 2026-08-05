@@ -338,8 +338,20 @@ jobs:
           for apk in host/*.apk; do
             echo "::group::$apk"
             python3 "$GITHUB_WORKSPACE/tools/verify_host_anchors.py" "$apk"
+            # Anchor 7 (the capture chain) is ablated against the same APK, because it went green
+            # on its first run and a gate that has never been red is indistinguishable from one
+            # that cannot fail. 1.10.0 shipped a beta-derived class name that no gate caught.
+            python3 "$GITHUB_WORKSPACE/tools/ablate_capture.py" "$apk"
             echo "::endgroup::"
           done
+
+      # A host APK is ~200MB and cannot live in the repo, so the step above skips on most runs.
+      # Say so out loud: a silently skipped anchor gate reads exactly like a passing one in the
+      # checks list, and that is the shape of failure this project keeps paying for.
+      - name: Report host-anchor coverage
+        if: hashFiles('host/**/*.apk') == ''
+        run: |
+          echo "::warning title=Host anchors unverified::No host/*.apk present, so anchor 7 (capture chain) was NOT checked against a real build. Host class names are obfuscated per channel and per release; verify locally with tools/verify_host_anchors.py plus tools/ablate_capture.py before shipping."
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
