@@ -32,9 +32,17 @@ import sys
 R = os.environ.get("GITHUB_WORKSPACE") or os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))
 MARKERS_KT = f"{R}/app/src/main/java/com/jiesa/xvideocatcher/hook/ProbeMarkers.kt"
+# Every file that builds a log line from a ProbeMarkers constant.
+#
+# A file missing from this list is not a small omission: the "declared but never used" check below
+# reads only these, so a marker used solely in an unlisted file looks like decoration and gets
+# reported, while a marker used *nowhere* in an unlisted file passes unnoticed. ShareSheetInjector
+# was added when 1.11.0 started logging, for exactly that reason -- its INJECT markers would
+# otherwise have sat outside this gate while appearing to be covered by it.
 SOURCES = [
     f"{R}/app/src/main/java/com/jiesa/xvideocatcher/hook/SharePathProbe.kt",
     f"{R}/app/src/main/java/com/jiesa/xvideocatcher/hook/XVideoCatcherModule.kt",
+    f"{R}/app/src/main/java/com/jiesa/xvideocatcher/hook/ShareSheetInjector.kt",
 ]
 README = f"{R}/README.md"
 

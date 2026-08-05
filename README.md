@@ -8,17 +8,27 @@ Everything runs inside X's process. There is no activity, no service, no backgro
 no launcher icon — the APK exists only to be loaded into X by LSPosed. Installing it and opening
 it does nothing by design; the entry appears in X.
 
-> ### 1.8.0-probe adds no entry, on purpose
+> ### 1.11.0 adds the entry back
 >
-> **The current build is diagnostic. It watches the share sheet and changes nothing in it, so there
-> is no download entry to look for and no download to trigger.** What it does instead is record what
-> X actually does, to the log described under Reading the log.
+> Versions 1.5–1.10 were diagnostic: they watched the Compose share sheet and then searched the
+> object graph for the tweet, because nothing on that path hands one over. Every device log ended
+> `exhausted=true`, which permits no conclusion either way.
 >
-> Versions 1.2, 1.3 and 1.4 each resolved their anchors, installed their hooks, logged success, and
-> then did nothing on the device. Those anchors were real classes of the right shape with **zero call
-> sites** in the shipped app. No static check catches that, because dead code has the correct shape.
-> `tools/verify_host_anchors.py` now proves reachability against the host APK, and injection returns
-> once a device confirms these anchors sit on the path a tap really takes.
+> 1.11.0 stops searching. It injects into the **tweet action sheet**, whose controller
+> (`com.twitter.tweet.action.legacy.e0`) *holds* the tweet in a field: at the moment the sheet is
+> rendered, the row list and the tweet are both in hand.
+>
+> Two failures were fixed to get here, and they are worth separating:
+>
+> 1. **The anchors were read from the wrong build.** Every release up to 1.10.0 recorded class names
+>    from a 12.13.0-**beta**.0 bundle while the device runs 12.13.0-**release**.0. R8 obfuscates the
+>    two channels independently, so `entity.b0` (beta) is `entity.c0` (release) — the device log line
+>    `com.twitter.model.core.entity.b0 not found` was that, not a version bump.
+> 2. **Reachability was never the same question as shape.** 1.2–1.4 hooked classes of exactly the
+>    right shape with **zero call sites** in the shipped app. `e0.h` was cleared differently: 3 direct
+>    call sites, and — because all three are in the same package, which is what a dead cluster looks
+>    like — a caller walk showing **57 classes outside** `tweet.action.legacy` entering it, including
+>    `com.twitter.timeline.g`, `com.twitter.tweetdetail.q1` and `com.twitter.app.gallery.j1`.
 
 ## Target
 
@@ -41,16 +51,25 @@ Four pieces, in the order they run:
 | Class | Job |
 | --- | --- |
 | `XVideoCatcherModule` | entry point; installs hooks once a host `Application` context exists |
+| `ShareSheetInjector` | adds the download row to the tweet action sheet and claims taps on it |
+| `HostRow` | builds the row by cloning one the host made, so no constructor signature is guessed |
 | `SharePathProbe` | Observes sheet open, row list and tap dispatch; adds nothing to the UI |
 | `TweetSearch` | Bounded breadth-first search for the tweet model, over hook receivers, the Decompose component tree and the foreground activity |
 | `HostActivity` | Tracks the foreground activity via `Application.registerActivityLifecycleCallbacks` |
 | `TweetMedia` | walks the live tweet object graph, picks the best rendition per item |
 | `HostDownloader` | fetches on a small pool, saves via MediaStore, reports by toast |
 
-`SharePathProbe` replaced `ShareSheetInjector`, which targeted the action-sheet family the
-reachability gate has since shown to be dead. `TweetMedia` and `HostDownloader` are unchanged and
-still gated by CI: the probe deliberately runs the *production* extractor rather than a probe-local
-copy, so a probe that reports media cannot mean something different from a build that downloads it.
+`ShareSheetInjector` is what makes 1.11.0 a working build rather than a probe. It hooks
+`e0.h(FragmentManager)` **before** it runs — `h` copies the row list into a builder and calls
+`toArray`, so a row appended afterwards would never be rendered — reads the tweet straight off the
+controller, and appends one row. Taps arrive at `com.twitter.app.common.dialog.o.u(int)` on
+`BaseDialogFragment`; the injector claims its own id and passes every other id through untouched.
+
+`SharePathProbe` stays installed. It covers the *Compose* share sheet, which is a different code
+path, and it is the only thing that would report a host redesign there; its log lines are prefixed
+`PROBE` where the injector's are `INJECT`. `TweetMedia` and `HostDownloader` are unchanged: the
+injector calls the same extractor the download uses, so a row can never promise media the tap would
+resolve differently.
 
 Hooks are installed from `Application.attach`, not at package load. `HostShapes` resolves host
 fields by loading host classes, and doing that before the host classloader is fully set up returns
@@ -281,6 +300,11 @@ The log answers the questions worth asking, in order:
 | `NO tweet candidate` — full line `PROBE   <where> NO tweet candidate (visits=… exhausted=… roots=…)` | Nothing reachable from either root. Every field of the receiver is dumped, so the next step needs no second trip to the device |
 | `PROBE   media extracted: N item(s)` | The production extractor ran and found media — downloading would have worked |
 | `PROBE sheet opened via …` | **Expected to be absent.** `chooser.j.J0` belongs to the legacy chooser, proven off the tweet-share path (see below). If this appears, X has switched sheet implementations and every anchor needs rechecking |
+| **`INJECT controller=`**`<class> show=<method>` | **The first line to look for.** Both injector anchors resolved. A following `INJECT controller MISS` instead means no download row will appear this session, and says so rather than leaving an absence to interpret |
+| `INJECT hook FAILED <name>: …` | That injector hook could not be installed. Names which; the others still install |
+| **`INJECT row added`**` (N item(s), list size=…)` | **The line that means it worked.** The download row was appended to the sheet the host is about to render, with the media count behind it |
+| `INJECT sheet opened, no downloadable media` | The sheet opened on a text-only or unsupported post, so no row was added. Expected on such posts — this is the difference between "correctly did nothing" and "broken", which is why it is a line and not silence |
+| **`INJECT tap claimed`** | **A key line.** A tap on the injected row reached the module and the download started. Its absence after `row added` localises the failure to dispatch rather than to injection |
 | `ERROR probe` … failed: … | A probe hook threw. It is caught, because a throw inside a host callback surfaces as X crashing |
 
 The markers matter more than their contents. Earlier diagnosis was ambiguous because "the hook never

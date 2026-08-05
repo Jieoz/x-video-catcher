@@ -203,9 +203,17 @@ jobs:
           check MediaSaver save
           check HostDownloader download
           check ModuleStrings downloadLabel,startedLabel,successLabel,failureLabel,noMediaLabel
-          # 1.5.0 ships the probe instead of an injector. Injection is withdrawn until a device
-          # confirms the anchors are on the tap path, so asserting ShareSheetInjector here would
-          # gate on a class this build deliberately does not contain.
+          # 1.11.0 ships the injector again, against the tweet action sheet rather than the family
+          # 1.2-1.4 hooked. Its anchor was cleared for reachability before any code was written
+          # against it (3 direct call sites on e0.h, 57 classes outside tweet.action.legacy entering
+          # the cluster), which is the check those three releases lacked.
+          check ShareSheetInjector install
+          # Row construction. The row is cloned from one the host built rather than constructed, so
+          # no obfuscated constructor signature is guessed; a missing HostRow means the injector
+          # resolves its anchors, appends nothing, and reports success.
+          check HostRow cloneWithLabel
+          # The probe stays: it covers the Compose sheet, a different path, and is the only thing
+          # that would report a redesign there.
           check SharePathProbe install
           # The search that replaced SharePathProbe's single-level field lookup. Its absence would
           # leave the probe reporting "no tweet candidate" from every dispatch -- which is precisely
@@ -240,7 +248,11 @@ jobs:
           # absence has to fail here instead of on a device. Only the internal entry point is
           # listed: the shape helpers below it are private and R8 inlines them, so gating them
           # would fail a correct build.
-          check HostResolver rowClass,rowProvider,actionClass,dispatchPoints,sheetOpen,tweetFieldIn,isTweetModel
+          # sheetController and sheetShowMethod are the 1.11.0 additions: the anchors the download
+          # row is injected through. Their absence would leave a build that logs resolution and then
+          # never appends a row -- the exact shape of the 1.2-1.4 failure, and unreadable as such
+          # from a device.
+          check HostResolver rowClass,rowProvider,actionClass,dispatchPoints,sheetOpen,tweetFieldIn,isTweetModel,sheetController,sheetShowMethod
 
       # The checker must be able to fail. A tool that reports success unconditionally is
       # indistinguishable from a passing gate, and this one has already been wrong once
@@ -276,6 +288,21 @@ jobs:
         run: |
           set -euo pipefail
           python3 "$GITHUB_WORKSPACE/tools/ablate_reachability.py"
+
+      # The 1.11.0 injector's own judgement calls: which class is the sheet controller, and which
+      # String on a cloned row is the visible label. Both are structural guesses about obfuscated
+      # code, both fail silently if wrong (a row in the wrong list, or a label written into an
+      # analytics field renders blank), and neither is observable from a device log.
+      #
+      # This ablates each clause and requires the unit suite to go red. It earned its place on first
+      # use: it found that the id guard had two redundant paths to the same null, and then that
+      # "a row with no int field cannot be cloned" could never fail at all, because setInt on a
+      # String field throws regardless of any guard -- that test was measuring the JDK. Both were
+      # fixed rather than the ablation being adjusted.
+      - name: Prove the injector shape and label rules are load-bearing
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/tools/ablate_kotlin.sh"
 
       # The README's marker table is what a device log gets read against, so a row promising a line
       # the build cannot print sends the reader hunting for output that will never appear -- which has

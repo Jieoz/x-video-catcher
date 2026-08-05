@@ -47,8 +47,15 @@ internal object HostClasses {
     /** Tweet wrapper (`Parcelable`). Field `a` is the tweet body, field `c` a nested quote. */
     const val TWEET_WRAPPER = "com.twitter.model.core.e"
 
-    /** Media entity. `p` = media type enum, `r` = video info, url strings live on the parent. */
-    const val MEDIA_ENTITY = "com.twitter.model.core.entity.b0"
+    /**
+     * Media entity. `p` = media type enum, `r` = video info, url strings live on the parent.
+     *
+     * `c0`, not `b0`. Every release up to 1.10.0 carried the **beta** name here: the anchors were
+     * read from a 12.13.0-beta.0 bundle while the device runs 12.13.0-release.0, and R8 obfuscates
+     * the two channels independently. That single wrong letter is what the device log reported as
+     * `com.twitter.model.core.entity.b0 not found` -- not a version bump, not a bad predicate.
+     */
+    const val MEDIA_ENTITY = "com.twitter.model.core.entity.c0"
     const val MEDIA_TYPE_FIELD = "p"
     const val MEDIA_VIDEO_INFO_FIELD = "r"
 
@@ -56,7 +63,7 @@ internal object HostClasses {
      * Media-type enum. Constant *names* are not obfuscated (they are reachable via `Enum.name()`),
      * which is why matching on the name is safe here while matching on a class name is not.
      */
-    const val MEDIA_TYPE_ENUM = "com.twitter.model.core.entity.b0\$d"
+    const val MEDIA_TYPE_ENUM = "com.twitter.model.core.entity.c0\$d"
     const val TYPE_VIDEO = "VIDEO"
     const val TYPE_ANIMATED_GIF = "ANIMATED_GIF"
     const val TYPE_IMAGE = "IMAGE"
@@ -88,4 +95,17 @@ internal object HostClasses {
 
     /** Where tap actions and the sheet state live: `sharesheet.t$g`, `sharesheet.r.h`. */
     const val SHARESHEET_PACKAGE = "com.x.dms.components.sharesheet"
+
+    // ---- tweet action sheet (where the download row is injected) ------------
+
+    /**
+     * The tweet action sheet's controller package: `legacy.e0` holds the rows in `a` and the tweet
+     * in `b`, and `e0.h(FragmentManager)` renders them.
+     *
+     * This is the path 1.11.0 injects into, and it is the answer to the question versions 1.5-1.10
+     * could not settle by graph search: the controller *holds* the tweet, so there is nothing to
+     * search for. Cleared for reachability with a disassembler before any code was written against
+     * it -- 3 direct call sites on `h`, and 57 classes outside this package entering the cluster.
+     */
+    const val TWEET_ACTION_PACKAGE = "com.twitter.tweet.action.legacy"
 }

@@ -76,11 +76,34 @@ internal object ProbeMarkers {
     /** Reported when the deep sweep found what the UI-thread search could not reach. */
     const val SWEEP_FOUND = "sweep TWEET FOUND"
 
+    // ---- injector (1.11.0) -------------------------------------------------
+    //
+    // Separate prefix from the probe's on purpose: the two cover different sheets, and a device log
+    // has to be readable as "which path did anything happen on". These go through the same constants
+    // mechanism rather than a parallel one, so check_markers.py gates them identically -- an
+    // injector line the README cannot explain is the same defect as a probe line it cannot explain.
+
+    /** Anchor resolution for the injector: controller and show-method, or MISS. */
+    const val INJECT_RESOLVE = "INJECT controller="
+
+    /** The download row was appended to the sheet's row list. */
+    const val INJECT_ROW_ADDED = "INJECT row added"
+
+    /** The sheet opened on a tweet with nothing downloadable, so no row was added. */
+    const val INJECT_NO_MEDIA = "INJECT sheet opened, no downloadable media"
+
+    /** A tap on the injected row reached the module. */
+    const val INJECT_TAP = "INJECT tap claimed"
+
+    /** An injector hook could not be installed. Names which one; the rest still install. */
+    const val INJECT_HOOK_FAILED = "INJECT hook FAILED"
+
     /** Every marker, for the README cross-check. */
     val ALL: List<String> = listOf(
         RESOLVE, HOOK_FAILED, ROWS_BUILT, LIST_MUTABLE, ACTION, RECEIVER,
         CANDIDATES, CANDIDATE_PATH, NO_CANDIDATE, CENSUS, PRUNED, ROOT, TWEET_FOUND, MEDIA_EXTRACTED,
         SHEET_OPENED, PROBE_ERROR, SWEEP, SWEEP_ABSENT, SWEEP_FOUND,
+        INJECT_RESOLVE, INJECT_ROW_ADDED, INJECT_NO_MEDIA, INJECT_TAP, INJECT_HOOK_FAILED,
     )
 
 }

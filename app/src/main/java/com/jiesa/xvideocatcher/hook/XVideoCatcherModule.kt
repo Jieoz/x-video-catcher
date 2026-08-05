@@ -89,9 +89,16 @@ class XVideoCatcherModule : IXposedHookLoadPackage {
             DiagLog.line("NOTE host version differs from the build this module was verified on")
         }
 
-        // Diagnostic build: observes the share sheet and adds nothing to it. Versions 1.2-1.4 each
-        // injected against an anchor that turned out to have zero call sites in the shipped app, so
-        // the reachability of these anchors is confirmed from a device before injection returns.
+        // The download row. Injects into the tweet action sheet, whose controller *holds* the tweet
+        // -- which is what replaced the graph search of 1.5-1.10. Its anchor was cleared for
+        // reachability with a disassembler before any code was written against it, the check that
+        // 1.2-1.4 lacked.
+        val strings = ModuleStrings()
+        ShareSheetInjector(classLoader, HostDownloader(strings), strings).install()
+
+        // The Compose share sheet probe stays installed. It covers a different sheet, it is the only
+        // thing that would report a host redesign of that path, and its lines are prefixed
+        // separately from the injector's. Removing it would trade live diagnostics for nothing.
         SharePathProbe(classLoader).install()
 
         // Flush now so the file exists, and proves attachment, before the user touches anything.
