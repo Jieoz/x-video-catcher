@@ -81,6 +81,15 @@ class XVideoCatcherModule : IXposedHookLoadPackage {
         // event that identifies it.
         HostActivity.track(application)
 
+        // Capture media URLs from the host's own player before anything else. This is what makes
+        // the download possible at all: 1.5-1.11 tried to reach media through the tweet object and
+        // the live share path never carries one -- it carries a status URL. The player, by
+        // definition, has already resolved a playable URL, so the module reads it there.
+        //
+        // Installed first because playback can start before any share sheet is opened; a capture
+        // armed at share time would miss the video the user is looking at.
+        MediaSpy.install(classLoader)
+
         DiagLog.line("module ${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
         DiagLog.line("host $hostVersion, anchors read from ${HostClasses.VERIFIED_HOST_VERSION}")
         if (hostVersion != null && hostVersion != HostClasses.VERIFIED_HOST_VERSION) {

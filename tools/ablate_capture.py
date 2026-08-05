@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Ablation for anchor 7, the share-sheet capture chain.
+"""Ablation for anchor 7, the media capture chain.
 
-Anchor 7 went green on the first run against the release APK. That is exactly when a gate is
-least trustworthy: the whole reason it exists is that the previous anchor set was recorded from
-the BETA bundle, passed nothing, and shipped to a phone as
-``com.twitter.model.core.entity.b0 not found``. So every constant it asserts is mutated here and
-required to turn the gate red.
+Anchor 7 verifies that the player's ``DataSpec`` still looks the way MediaSpy expects. It replaced
+a chain rooted at the legacy share-sheet controller, which had been green for five releases while
+the class it asserted was never instantiated at runtime -- the gate proved structural presence and
+was read as proof of use. 1.11 shipped on it and did nothing on the device.
 
-Each ablation is a name this host does not use. If the gate stays green under one, that assertion
-is decoration and cannot report the next obfuscation rename -- which is the only job it has.
+So every constant the new gate asserts is mutated here and required to turn it red. A green run
+under any ablation means that assertion is decoration and cannot report the next R8 rename, which
+is the only job it has.
 
-The APK is parsed ONCE and the class index reused, because parsing 231k classes per axis would
-make this too slow to run and a gate nobody runs is worse than no gate.
+The APK is parsed ONCE and the class index reused: parsing 231k classes per axis would make this
+too slow to run, and a gate nobody runs is worse than no gate.
 
 Usage: ablate_capture.py <host.apk>
 """
@@ -27,35 +27,46 @@ from dexdefs import load_classes  # noqa: E402
 # The bad values are deliberately plausible -- neighbouring letters in the same package, the kind
 # of thing the next R8 run actually produces -- not obvious garbage like "NOPE".
 ABLATIONS = [
-    ("controller class renamed",
-     "SHEET_CONTROLLER", "Lcom/twitter/tweet/action/legacy/h0;", "capture"),
-    ("tweet field moved",
-     "SHEET_TWEET_FIELD", "c", "capture"),
-    ("rows field moved",
-     "SHEET_ROWS_FIELD", "d", "sheet rows"),
-    ("show method renamed",
-     "SHEET_SHOW_METHOD", "g", "hook point"),
-    ("controller package renamed",
-     "SHEET_PKG", "Lcom/twitter/tweet/action/modern/", "capture"),
-    ("wrapper class renamed",
-     "TWEET_WRAPPER", "Lcom/twitter/model/core/f;", "capture"),
-    ("body class renamed",
-     "TWEET_BODY", "Lcom/twitter/model/core/c;", "wrapper"),
-    ("id getter renamed",
-     "TWEET_ID_GETTER", "getTweetId", "lookup key"),
-    ("media entity renamed (the real 1.10.0 bug)",
-     "MEDIA_ENTITY", "Lcom/twitter/model/core/entity/b0;", "media type"),
-    ("media type enum renamed",
-     "MEDIA_TYPE_ENUM", "Lcom/twitter/model/core/entity/c0$e;", "media type"),
-    ("video info renamed",
-     "VIDEO_INFO", "Lcom/twitter/media/av/model/y;", "video info"),
-    # b0 is the sharpest possible wrong answer here: it sits next to a0 in the same package and
-    # also starts with an int, so it satisfied a bitrate-only check. It is caught on the URL
-    # field, which is the thing the download actually needs.
-    ("video variant renamed",
-     "VIDEO_VARIANT", "Lcom/twitter/media/av/model/b0;", "variant url"),
-    ("media constant no longer required",
-     "MEDIA_TYPE_CONSTANTS", ("VIDEO", "ANIMATED_GIF", "IMAGE", "LIVEPHOTO"), "media type"),
+    # The class letter. This is the drift that actually happens: `j` here, and a different letter
+    # in the next bundle. Neighbouring letters in the same package are used rather than obvious
+    # garbage, because a plausible wrong answer is what R8 produces.
+    # Expects "re-measured": on this host the neighbouring letter is a real class in the same
+    # package, so the gate does not take its `class is None` path -- it sees a class whose field
+    # sequence does not match. Asserting the message that actually distinguishes a drifted name
+    # from a changed DataSpec, rather than the one I assumed would fire.
+    ("dataspec class renamed",
+     "DATASPEC", "Landroidx/media3/datasource/i;", "re-measured"),
+    # The package. If this is renamed, shape matching has nowhere to search and every field
+    # assertion below is void, so it has to fail loudly and first.
+    ("media3 datasource package renamed",
+     "MEDIA3_DATASOURCE_PKG", "Landroidx/media3/datasrc/", "package"),
+    # The field sequence, mutated one type at a time. Both ends are covered: the Uri the hook
+    # reads positionally, and a tail field, so an assertion that only checked the head would show
+    # up here.
+    ("field sequence: uri type changed",
+     "DATASPEC_FIELDS",
+     ("Ljava/lang/String;", "J", "I", "[B", "Ljava/util/Map;",
+      "J", "J", "Ljava/lang/String;", "I"),
+     "fields are"),
+    ("field sequence: tail field changed",
+     "DATASPEC_FIELDS",
+     ("Landroid/net/Uri;", "J", "I", "[B", "Ljava/util/Map;",
+      "J", "J", "Ljava/lang/String;", "J"),
+     "fields are"),
+    # Field count, which a subset comparison would miss.
+    ("field sequence: one field dropped",
+     "DATASPEC_FIELDS",
+     ("Landroid/net/Uri;", "J", "I", "[B", "Ljava/util/Map;",
+      "J", "J", "Ljava/lang/String;"),
+     "fields are"),
+    # The uri field letter the hook reads positionally.
+    ("uri field moved",
+     "DATASPEC_URI_FIELD", "b", "expected android.net.Uri"),
+    # The builder. Pointing this at a class that does not exist must FAIL: otherwise the constant
+    # is unprotected and the gate would keep reporting that it verified the finality discriminator
+    # while having nothing to compare against.
+    ("builder class renamed",
+     "DATASPEC_BUILDER", "Landroidx/media3/datasource/j$b;", "builder name has drifted"),
 ]
 
 

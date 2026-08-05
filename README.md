@@ -8,27 +8,25 @@ Everything runs inside X's process. There is no activity, no service, no backgro
 no launcher icon — the APK exists only to be loaded into X by LSPosed. Installing it and opening
 it does nothing by design; the entry appears in X.
 
-> ### 1.11.0 adds the entry back
+> ### 1.12.0 captures the media from the player, not the tweet
 >
-> Versions 1.5–1.10 were diagnostic: they watched the Compose share sheet and then searched the
-> object graph for the tweet, because nothing on that path hands one over. Every device log ended
-> `exhausted=true`, which permits no conclusion either way.
+> Versions 1.5–1.11 all tried to reach media through the tweet object on the share path. Device logs
+> for 1.11 ended that family: the live sheet (`com.x.share.impl`) is handed a **status URL**, and
+> every graph walk reported `media extracted: 0 item(s)`. There was no tweet to search.
 >
-> 1.11.0 stops searching. It injects into the **tweet action sheet**, whose controller
-> (`com.twitter.tweet.action.legacy.e0`) *holds* the tweet in a field: at the moment the sheet is
-> rendered, the row list and the tweet are both in hand.
+> 1.12.0 reads the URL the host's own media3 player has already resolved. The hook is on
+> `androidx.media3.datasource.DataSpec` (shape-matched; R8 renames it to `j`), which every playback
+> request must construct. The download row is injected into the **live** share sheet the probe
+> actually saw (`com.x.share.impl`), not the unused tweet-action controller that 1.11 selected from
+> static call sites.
 >
-> Two failures were fixed to get here, and they are worth separating:
+> What this build can save today: **progressive MP4** captured from the player. An HLS master or
+> variant is logged (`MEDIASPY HLS_…`) but not written as a playable file yet — that needs a playlist
+> parser, and it is deliberately not pre-built before device evidence shows which kind of URL arrives.
 >
-> 1. **The anchors were read from the wrong build.** Every release up to 1.10.0 recorded class names
->    from a 12.13.0-**beta**.0 bundle while the device runs 12.13.0-**release**.0. R8 obfuscates the
->    two channels independently, so `entity.b0` (beta) is `entity.c0` (release) — the device log line
->    `com.twitter.model.core.entity.b0 not found` was that, not a version bump.
-> 2. **Reachability was never the same question as shape.** 1.2–1.4 hooked classes of exactly the
->    right shape with **zero call sites** in the shipped app. `e0.h` was cleared differently: 3 direct
->    call sites, and — because all three are in the same package, which is what a dead cluster looks
->    like — a caller walk showing **57 classes outside** `tweet.action.legacy` entering it, including
->    `com.twitter.timeline.g`, `com.twitter.tweetdetail.q1` and `com.twitter.app.gallery.j1`.
+> Diagnostic lines are still written under `Android/data/com.twitter.android/files/xvc-diag-*.txt`
+> (`MEDIASPY …`, inject resolve / no-media, download start/fail). Force-stop X after installing, open
+> a video, share once, then pull the log.
 
 ## Target
 

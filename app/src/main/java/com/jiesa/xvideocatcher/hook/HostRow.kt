@@ -73,6 +73,21 @@ internal object HostRow {
     }
 
     /**
+     * The user-visible label on a row-like object, or null when it has none.
+     *
+     * Public because tap identification needs it: the live share action carries the row it was built
+     * from, and the only reliable way to recognise the injected row is that its label is the string
+     * this module wrote. Reusing [labelFieldOf] rather than re-deriving "which field is the label"
+     * at the call site keeps one definition -- two would drift, and the tap would stop matching the
+     * row that was appended.
+     */
+    fun labelOf(row: Any): String? {
+        val fields = instanceFields(row.javaClass)
+        val f = labelFieldOf(row, fields) ?: return null
+        return runCatching { f.get(row) as? String }.getOrNull()
+    }
+
+    /**
      * The field holding the user-visible label.
      *
      * Read off the *template*, because the decision is about which field holds real text, and the

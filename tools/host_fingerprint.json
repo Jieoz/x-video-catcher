@@ -1,0 +1,55 @@
+{
+  "_comment": [
+    "Measured facts about the host build the DataSpec anchor was verified against.",
+    "This exists because the reachability gate needs a ~200MB host APK that cannot live in",
+    "the repo, so on CI it skips with a warning -- and a skipped gate reads like a passing one.",
+    "1.11 shipped that way. CI cannot re-derive these numbers without the APK, but it CAN",
+    "assert that the module's own constants still agree with what was measured here, which",
+    "catches an edit to MediaSpy that silently diverges from the verified host.",
+    "Regenerate with tools/fingerprint_host.py <host.apk> after measuring a new bundle."
+  ],
+  "construction_sites": [
+    "androidx.media3.datasource.f.call -> new androidx.media3.datasource.j  [classes.dex]",
+    "androidx.media3.datasource.j$a.a -> new androidx.media3.datasource.j  [classes.dex]",
+    "androidx.media3.datasource.j.c -> new androidx.media3.datasource.j  [classes.dex]",
+    "androidx.media3.exoplayer.hls.HlsMediaSource.r -> new androidx.media3.datasource.j  [classes.dex]",
+    "androidx.media3.exoplayer.hls.g.e -> new androidx.media3.datasource.j  [classes.dex]",
+    "androidx.media3.exoplayer.hls.playlist.b$b.d -> new androidx.media3.datasource.j  [classes.dex]",
+    "androidx.media3.exoplayer.hls.q.r -> new androidx.media3.datasource.j  [classes.dex]",
+    "androidx.media3.exoplayer.source.m0$b.a -> new androidx.media3.datasource.j  [classes.dex]"
+  ],
+  "dataspec": {
+    "all_final": true,
+    "builder": "Landroidx/media3/datasource/j$a;",
+    "builder_present": "present",
+    "descriptor": "Landroidx/media3/datasource/j;",
+    "field_names": [
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+      "g",
+      "h",
+      "i"
+    ],
+    "field_types": [
+      "Landroid/net/Uri;",
+      "J",
+      "I",
+      "[B",
+      "Ljava/util/Map;",
+      "J",
+      "J",
+      "Ljava/lang/String;",
+      "I"
+    ],
+    "uri_field": "a"
+  },
+  "host": {
+    "apk_bytes": 197882976,
+    "apk_sha256": "9bfb0f2b14bad2bc7ac5eb151b2173de0d22e6ef429b54333ba27202a5cce2cd",
+    "class_count": 231569
+  }
+}

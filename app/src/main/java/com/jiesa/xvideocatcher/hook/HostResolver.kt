@@ -398,56 +398,8 @@ internal object HostResolver {
     // including com.twitter.timeline.g, com.twitter.tweetdetail.q1 and com.twitter.app.gallery.j1
     // -- the timeline, the tweet detail screen and the gallery.
 
-    /**
-     * The controller that builds the tweet action sheet.
-     *
-     * Shape: holds the row `List`, a tweet model, and a `Resources`; declares a method taking a
-     * `FragmentManager` and returning void. Measured unique inside the package on
-     * 12.13.0-release.0 (real: `legacy.e0`, 15 fields).
-     *
-     * The `FragmentManager` method is part of the predicate rather than a separate lookup: a class
-     * holding rows and a tweet but unable to show a dialog is not the sheet controller, and
-     * requiring both halves is what keeps this from matching a view-model.
-     */
-    fun sheetController(classLoader: ClassLoader): Class<*>? {
-        val hits = candidateClasses(classLoader, HostClasses.TWEET_ACTION_PACKAGE)
-            .filter { isSheetControllerShape(it) }
-            .toList()
-        if (hits.size != 1) {
-            DiagLog.line("sheet controller: ${hits.size} candidates in ${HostClasses.TWEET_ACTION_PACKAGE}")
-            return null
-        }
-        return hits[0]
-    }
 
-    /** Shape match for the sheet controller, split out so a test can assert on it directly. */
-    internal fun isSheetControllerShape(cls: Class<*>): Boolean {
-        val fields = instanceFields(cls)
-        // Exactly one List: the rows. More than one and "which list is the sheet" becomes a guess.
-        if (fields.count { List::class.java.isAssignableFrom(it.type) } != 1) return false
-        // A tweet model, by the same predicate the search uses.
-        if (fields.none { isTweetModel(it.type) }) return false
-        // And it must be able to show the sheet.
-        return showMethodOf(cls) != null
-    }
 
-    /**
-     * The method that renders the sheet: `(FragmentManager) -> void`.
-     *
-     * Hooked `before`, since it copies the row list into a builder and calls `toArray` -- a row
-     * appended afterwards would never reach the rendered sheet.
-     */
-    fun sheetShowMethod(controller: Class<*>): Method? = showMethodOf(controller)
-
-    private fun showMethodOf(cls: Class<*>): Method? {
-        val hits = cls.declaredMethods.filter { m ->
-            !Modifier.isStatic(m.modifiers) &&
-                m.parameterTypes.size == 1 &&
-                m.parameterTypes[0].name == FRAGMENT_MANAGER &&
-                m.returnType == Void.TYPE
-        }
-        return hits.singleOrNull()?.also { it.isAccessible = true }
-    }
 
     /** Instance fields of [cls] and its superclasses, nearest class first. */
     private fun instanceFields(cls: Class<*>): List<java.lang.reflect.Field> {

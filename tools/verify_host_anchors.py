@@ -66,45 +66,56 @@ SHARE_IMPL_PKG = "Lcom/x/share/impl/"
 SHARE_ROW_PKG = "Lcom/x/models/share/"
 SHARESHEET_PKG = "Lcom/x/dms/components/sharesheet/"
 
-# --- share-sheet capture chain, measured on 12.13.0-RELEASE.0 (versionCode 312130000) -------
+# --- media capture chain, measured on 12.13.0-RELEASE.0 (versionCode 312130000) -------------
 #
 # Read this before touching the names below.
 #
-# Everything recorded before 20260805 came from the 12.13.0-BETA bundle, and beta and release
-# are obfuscated SEPARATELY. That is what the device log's
-# `com.twitter.model.core.entity.b0 not found` actually meant: channel drift, not a version
-# bump, and not a wrong criterion. Five releases were spent chasing that as a search problem.
+# What this replaced, and why. Until 1.11 this gate verified a chain rooted at the LEGACY sheet
+# controller `com/twitter/tweet/action/legacy/e0`: controller -> tweet wrapper -> tweet body ->
+# media entity -> video variant. Every link was genuinely present in the APK, so the gate went
+# green on every run, and 1.11 shipped on the strength of it. The device log answered:
 #
-# So the controller is `e0` here where beta had `h0` -- same 15 fields in the same order, with
-# `a` the row list and `b` the tweet wrapper. Its PACKAGE survives obfuscation, which is why it
-# is findable at all; the class letter does not, which is why this gate exists.
+#     sheet controller: 0 candidates in com.twitter.tweet.action.legacy
 #
-# These stay literal, copied from the release APK, for the same reason every other anchor here
-# is literal: a name derived at runtime cannot drift, and therefore cannot report the next
-# rewrite.
-SHEET_CONTROLLER = "Lcom/twitter/tweet/action/legacy/e0;"
-SHEET_SHOW_METHOD = "h"          # h(FragmentManager) -> void, shows the sheet
-SHEET_ROWS_FIELD = "a"           # java.util.List of sheet rows
-SHEET_TWEET_FIELD = "b"          # the tweet wrapper, i.e. what four releases failed to reach
-TWEET_WRAPPER = "Lcom/twitter/model/core/e;"
-TWEET_BODY = "Lcom/twitter/model/core/d;"
-MEDIA_ENTITY = "Lcom/twitter/model/core/entity/c0;"
-MEDIA_TYPE_ENUM = "Lcom/twitter/model/core/entity/c0$d;"
-VIDEO_INFO = "Lcom/twitter/media/av/model/z;"
-VIDEO_VARIANT = "Lcom/twitter/media/av/model/a0;"
+# The class exists and has 20 call sites; it is never instantiated on the user's path. The gate
+# had proved the chain was STRUCTURALLY PRESENT and never that it was EXECUTED -- so it endorsed
+# an architecture the host had already abandoned, five releases running. Structural presence is
+# not reachability, and reachability is not being on the live path.
+#
+# The replacement does not depend on a tweet object at all. The host cannot play a video without
+# resolving a playable URL itself, and every such URL is carried through a `DataSpec`. So the
+# anchor is that value type, and the two properties asserted here are the ones that were missing
+# before: that the shape identifies it UNIQUELY (its Builder declares an identical field
+# sequence), and that media3 actually CONSTRUCTS it (checked against instruction-level call
+# sites, not class presence).
+#
+# `androidx.media3.*` package names survive R8 in this bundle -- verified, unlike the
+# `com.twitter.*` letters that drifted between beta and release and cost five releases. The class
+# letter still drifts, which is why the module matches on field shape and this gate pins the
+# shape rather than the letter.
+DATASPEC = "Landroidx/media3/datasource/j;"
+DATASPEC_BUILDER = "Landroidx/media3/datasource/j$a;"
 
-# getId survived R8 on the tweet body, so it is the one lookup key on this chain that is not a
-# single obfuscated letter.
-TWEET_ID_GETTER = "getId"
+# DataSpec's nine instance fields, in declaration order, as dex descriptors. The module compares
+# the same sequence via reflection; keeping both literal means a host change fails here rather
+# than silently capturing nothing on a phone.
+DATASPEC_FIELDS = (
+    "Landroid/net/Uri;", "J", "I", "[B", "Ljava/util/Map;",
+    "J", "J", "Ljava/lang/String;", "I",
+)
 
-# Enum.name() must return the real string at runtime, so R8 keeps these constants even while
-# renaming the class that holds them. That is what located the media entity on release, and it
-# is the property this gate leans on rather than any letter.
-MEDIA_TYPE_CONSTANTS = ("VIDEO", "ANIMATED_GIF", "IMAGE")
+# The URI is field 0 and is what the hook reads. Named separately because it is the one field
+# whose position the module depends on positionally.
+DATASPEC_URI_FIELD = "a"
 
-# The controller's package is unobfuscated. Assert that so a future rename of the package
-# itself -- the one drift that would defeat every letter below -- fails here first.
-SHEET_PKG = "Lcom/twitter/tweet/action/legacy/"
+# The unobfuscated package. If this is ever renamed, shape matching has nowhere to search, so it
+# is asserted first and reported plainly.
+MEDIA3_DATASOURCE_PKG = "Landroidx/media3/datasource/"
+
+# HLS is how X delivers video on this build; these are the classes observed constructing a
+# DataSpec. Used to assert the constructor is reached from the media pipeline specifically, not
+# merely from somewhere in a 200MB APK.
+HLS_MEDIA_SOURCE_PKG = "Landroidx/media3/exoplayer/hls/"
 
 ROW_FIELD_COUNT = 5
 VALUE_TYPE_METHODS = ("equals", "hashCode", "toString")
@@ -238,134 +249,158 @@ def _field_type(cls, fname):
 
 
 def analyse_capture_chain(classes):
-    """Anchor 7: the share-sheet capture chain. Returns (results, failures).
+    """Anchor 7: the media capture chain. Returns (results, failures).
 
     Kept separate from ``analyse`` because it answers a different question. ``analyse`` asks
-    whether the Compose share sheet under ``com.x.share.impl`` still looks the way HostResolver
-    expects. This asks whether the tweet can be read directly off the LEGACY sheet controller,
-    which is a different code path in the host -- and the one that actually holds the tweet.
+    whether the Compose share sheet still looks the way HostResolver expects -- that is where the
+    download row is inserted. This asks whether the player's ``DataSpec`` still looks the way
+    MediaSpy expects, which is where the URL comes from.
 
-    Four probe releases searched the object graph at share time and never found a tweet, with
-    ``exhausted=false`` proving the walk had drained everything reachable. It was reachable all
-    along, one field off a controller in an unobfuscated package; the searches were rooted in
-    the wrong sheet.
+    The previous version of this function asserted a chain from the legacy sheet controller to a
+    video variant. Every link was present in the APK and the gate was green for five releases,
+    including 1.11, whose device log then reported ``0 candidates`` for the controller: present,
+    never instantiated. Structural presence was mistaken for use.
 
-    Every link is asserted rather than printed. The 1.10.0 device log carried
-    ``media entity class com.twitter.model.core.entity.b0 not found`` -- a name recorded from
-    the BETA bundle and never rechecked against release. That is exactly the failure this gate
-    exists to turn red before an APK reaches a phone.
+    So the assertions here are deliberately not "these classes exist". They are:
+
+      1. the package the module searches is still unobfuscated,
+      2. the field sequence identifies DataSpec,
+      3. that sequence does NOT also identify its Builder by anything other than finality --
+         i.e. the property the module actually discriminates on is present in the APK.
+
+    (3) is the one that matters most and the one no earlier gate had an equivalent of. The Builder
+    declares the same nine types in the same order; a shape check without the final-field clause
+    matches both, and hooking the Builder captures half-built specs. Asserting the discriminator
+    exists in the host means a host change that makes it stop discriminating fails here.
     """
     results = {}
     failures = []
 
-    def need_field(owner, fname, expect, what):
-        cls = classes.get(owner)
-        if cls is None:
-            failures.append("%s: class %s missing from host" % (what, pretty(owner)))
-            return
-        actual = _field_type(cls, fname)
-        if actual is None:
-            failures.append("%s: %s.%s not found" % (what, pretty(owner), fname))
-        elif actual != expect:
-            failures.append("%s: %s.%s is %s, expected %s"
-                            % (what, pretty(owner), fname, pretty(actual), pretty(expect)))
+    if not any(name.startswith(MEDIA3_DATASOURCE_PKG) for name in classes):
+        failures.append("capture: package %s absent -- shape matching has nothing to search"
+                        % MEDIA3_DATASOURCE_PKG.strip("L;").replace("/", "."))
+        return results, failures
 
-    # The unobfuscated package is what makes the controller findable at all; if it is ever
-    # renamed, every letter below is void, so check it first and say so plainly.
-    if not any(name.startswith(SHEET_PKG) for name in classes):
-        failures.append("capture: package %s absent -- every anchor below is void"
-                        % SHEET_PKG.strip("L;").replace("/", "."))
+    spec = classes.get(DATASPEC)
+    if spec is None:
+        failures.append("capture: %s missing from host -- the DataSpec letter has drifted, so "
+                        "MediaSpy's shape search must be re-measured" % pretty(DATASPEC))
+        return results, failures
 
-    # capture -- the sheet controller holds the tweet outright, no search
-    need_field(SHEET_CONTROLLER, SHEET_TWEET_FIELD, TWEET_WRAPPER, "capture")
-    need_field(SHEET_CONTROLLER, SHEET_ROWS_FIELD, "Ljava/util/List;", "sheet rows")
+    spec_fields = [f for f in spec["fields"] if not f["static"]]
+    actual = tuple(f["type"] for f in spec_fields)
+    if actual != DATASPEC_FIELDS:
+        # Distinguish "the letter now points at some other class" from "DataSpec itself changed".
+        # Both are red, but they need different fixes, and an ablation that renamed DATASPEC to a
+        # neighbouring letter reported the field-drift message -- because that letter is a real
+        # class in the same package, so the earlier `is None` branch never ran. A gate that is red
+        # for a misleading reason sends the next reader to re-measure the wrong thing.
+        if not actual:
+            failures.append(
+                "capture: %s has no instance fields -- this letter is some other class, so the "
+                "DataSpec name has drifted and must be re-measured" % pretty(DATASPEC))
+        else:
+            failures.append("capture: %s fields are %s, expected %s"
+                            % (pretty(DATASPEC), [pretty(t) for t in actual],
+                               [pretty(t) for t in DATASPEC_FIELDS]))
 
-    # the hook point: h(FragmentManager) -> void, called to show the sheet
-    ctrl = classes.get(SHEET_CONTROLLER)
-    if ctrl is None:
-        failures.append("hook point: controller %s missing from host"
-                        % pretty(SHEET_CONTROLLER))
-    elif not any(m["name"] == SHEET_SHOW_METHOD
-                 and m["params"] == ["Landroidx/fragment/app/FragmentManager;"]
-                 and m["ret"] == "V"
-                 for m in ctrl["methods"]):
-        failures.append("hook point: %s.%s(FragmentManager) -> void not found"
-                        % (pretty(SHEET_CONTROLLER), SHEET_SHOW_METHOD))
+    # The discriminator: every instance field final. This is what separates the spec from its
+    # builder, and the module's predicate rests on it entirely.
+    non_final = [f["name"] for f in spec_fields if not f.get("final")]
+    if non_final:
+        failures.append(
+            "capture: %s has non-final field(s) %s -- MediaSpy separates the spec from its "
+            "Builder by finality, so it would now match both"
+            % (pretty(DATASPEC), non_final))
 
-    # wrapper -> body, and the quoted tweet, which carries its own media
-    need_field(TWEET_WRAPPER, "a", TWEET_BODY, "wrapper")
-    need_field(TWEET_WRAPPER, "c", TWEET_WRAPPER, "quoted tweet")
-
-    # lookup key -- the share URL carries a status id, so capture is useless without this
-    body = classes.get(TWEET_BODY)
-    if body is None:
-        failures.append("lookup key: class %s missing from host" % pretty(TWEET_BODY))
-    elif not any(m["name"] == TWEET_ID_GETTER and m["ret"] == "J" and not m["params"]
-                 for m in body["methods"]):
-        failures.append("lookup key: %s.%s() -> long not found"
-                        % (pretty(TWEET_BODY), TWEET_ID_GETTER))
-
-    # media -- entity carries its type and, for video, the variant list
-    need_field(MEDIA_ENTITY, "p", MEDIA_TYPE_ENUM, "media type")
-    need_field(MEDIA_ENTITY, "r", VIDEO_INFO, "video info")
-    need_field(VIDEO_INFO, "c", "Ljava/util/List;", "variant list")
-    # The variant is where the playable URL actually lives, so its identity has to rest on more
-    # than the bitrate: av/model/b0 on this build is (int a, int b, int c) and would satisfy a
-    # bitrate-only assertion while carrying no URL at all. Requiring the String alongside is what
-    # makes a rename of this class detectable -- the ablation proved the bitrate alone was not.
-    need_field(VIDEO_VARIANT, "a", "I", "variant bitrate")
-    need_field(VIDEO_VARIANT, "b", "Ljava/lang/String;", "variant url")
-
-    enum = classes.get(MEDIA_TYPE_ENUM)
-    if enum is None:
-        failures.append("media type: enum %s missing from host" % pretty(MEDIA_TYPE_ENUM))
+    # And the other half of the same claim: the Builder must be the thing finality rejects. If it
+    # ever became final-fielded too, the predicate would silently match two classes again.
+    builder = classes.get(DATASPEC_BUILDER)
+    if builder is None:
+        # Fatal, and this took an ablation to get right. The first version recorded "absent" and
+        # passed, reasoning that R8 may drop a builder -- but that makes the constant unprotected:
+        # point DATASPEC_BUILDER at a class that does not exist and the gate stays green while
+        # silently no longer checking the discriminator it claims to check.
+        #
+        # On this host the builder IS present (it is what `new DataSpec.Builder().build()` compiles
+        # to, and it appears in the constructor call sites). So its absence means the name drifted,
+        # which is exactly what needs reporting. If a future bundle genuinely drops it, this fails
+        # and the constant gets re-measured deliberately rather than by accident.
+        results["dataspec_builder"] = "absent"
+        failures.append(
+            "capture: %s missing from host -- the builder name has drifted, so the finality "
+            "discriminator is no longer being verified against anything"
+            % pretty(DATASPEC_BUILDER))
     else:
-        consts = {f["name"] for f in enum["fields"]
-                  if f["static"] and f["type"] == MEDIA_TYPE_ENUM}
-        missing = [c for c in MEDIA_TYPE_CONSTANTS if c not in consts]
-        if missing:
-            failures.append("media type: %s missing constant(s) %s"
-                            % (pretty(MEDIA_TYPE_ENUM), missing))
-        results["media_types"] = sorted(consts)
+        b_fields = [f for f in builder["fields"] if not f["static"]]
+        b_types = tuple(f["type"] for f in b_fields)
+        results["dataspec_builder"] = "present"
+        if b_types == DATASPEC_FIELDS and all(f.get("final") for f in b_fields):
+            failures.append(
+                "capture: %s declares the same field sequence AND is fully final -- finality no "
+                "longer discriminates, so MediaSpy would match the builder too"
+                % pretty(DATASPEC_BUILDER))
 
-    results["capture_chain"] = [SHEET_CONTROLLER, TWEET_WRAPPER, TWEET_BODY, MEDIA_ENTITY]
+    # The URI field the hook reads positionally.
+    uri = _field_type(spec, DATASPEC_URI_FIELD)
+    if uri is None:
+        failures.append("capture: %s.%s not found" % (pretty(DATASPEC), DATASPEC_URI_FIELD))
+    elif uri != "Landroid/net/Uri;":
+        failures.append("capture: %s.%s is %s, expected android.net.Uri"
+                        % (pretty(DATASPEC), DATASPEC_URI_FIELD, pretty(uri)))
+
+    results["capture_chain"] = [DATASPEC]
     return results, failures
 
 
+def _pkg_prefix(descriptor_pkg):
+    """``Landroidx/media3/datasource/`` -> ``androidx.media3.datasource.``
+
+    The reachability scanner reports call sites already pretty-printed, so anything compared
+    against them has to be in the same form.
+    """
+    return descriptor_pkg.lstrip("L").replace("/", ".")
+
+
 def check_capture_reachability(apk):
-    """Prove the hook point is live code, not a shape that happens to hold a tweet.
+    """Prove the hook point is live code, not a shape that merely exists.
 
-    Shape cannot detect unreachability -- the lesson 1.2 through 1.4 paid for, when anchors
-    matched a class nobody ever ran. The sheet controller is reached by being *constructed* and
-    its show method by being *called*, so both halves are checked: something builds the
-    controller, and something invokes the method being hooked.
-
-    A hook on a method no caller reaches is silent at runtime and looks identical to a hook that
-    simply never fired, which is the failure mode this rules out before shipping.
+    This is the check whose absence let 1.11 ship. A ``DataSpec`` is *constructed*, not invoked
+    on, so the question is whether anything builds one -- and specifically whether the media
+    pipeline does, rather than some unrelated corner of a 200MB APK.
 
     Returns ``(sites, failures)`` where sites is the full list of constructing classes.
     """
     try:
-        built = find_instantiations(apk, [SHEET_CONTROLLER])
+        built = find_instantiations(apk, [DATASPEC])
     except ScanError as exc:
         return [], ["capture chain: instruction scan failed: %s" % exc]
 
-    sites = sorted(set(built.get(SHEET_CONTROLLER, [])))
+    sites = sorted(set(built.get(DATASPEC, [])))
     if not sites:
-        return sites, ["capture chain: %s is never constructed, so hooking it can never fire"
-                       % pretty(SHEET_CONTROLLER)]
+        return sites, ["capture chain: %s is never constructed, so hooking its constructor can "
+                       "never fire" % pretty(DATASPEC)]
 
-    # The method being hooked must have a caller; otherwise the hook is dead on arrival.
-    try:
-        callers = find_callers(apk, [(SHEET_CONTROLLER, SHEET_SHOW_METHOD)])
-    except ScanError as exc:
-        return sites, ["capture chain: caller scan failed: %s" % exc]
-
-    show_callers = sorted(set(callers.get((SHEET_CONTROLLER, SHEET_SHOW_METHOD), [])))
-    if not show_callers:
+    # Constructed *by the media pipeline*. Without this the check would pass on any APK that
+    # happens to build a DataSpec anywhere, which is the same weakness as asserting a class
+    # exists: true, and not evidence the hook sees playback.
+    #
+    # Matched against the already-pretty-printed site strings that find_instantiations returns
+    # ("androidx.media3.exoplayer.hls.HlsMediaSource.r -> new ... [classes.dex]"), not against
+    # type descriptors. A first version tested `startswith("Landroidx/media3/...")` on these and
+    # was therefore always false: the gate reported "constructed only outside media3" while
+    # printing a list of media3 constructors directly above it. A predicate that contradicts its
+    # own evidence is the shape to watch for.
+    media_prefixes = (
+        _pkg_prefix(HLS_MEDIA_SOURCE_PKG),
+        "androidx.media3.exoplayer.",
+        _pkg_prefix(MEDIA3_DATASOURCE_PKG),
+    )
+    from_media = [s for s in sites if s.startswith(media_prefixes)]
+    if not from_media:
         return sites, [
-            "capture chain: %s.%s has no call sites -- a hook there would never run"
-            % (pretty(SHEET_CONTROLLER), SHEET_SHOW_METHOD)
+            "capture chain: %s is constructed only outside media3 (%s) -- a hook there would not "
+            "see playback" % (pretty(DATASPEC), [pretty(s) for s in sites[:6]])
         ]
     return sites, []
 
@@ -450,10 +485,15 @@ def check_reachability(apk, results, classes=None):
     for cls in results.get("row", []):
         add("row model %s" % pretty(cls), cls, None)
 
-    # The sheet controller: method=None asks only "is this type referenced". The dedicated
-    # check_capture_reachability pass is what proves the hook point has real callers.
+    # The capture anchor: method=None asks only "is this type referenced". The dedicated
+    # check_capture_reachability pass is what proves the constructor is actually built, and by the
+    # media pipeline specifically.
+    #
+    # Labelled "media capture", not "sheet controller". The old label survived the move to the
+    # DataSpec anchor and printed "sheet controller androidx.media3.datasource.j" -- a line that
+    # would send the next reader looking for a share sheet in the player's data layer.
     for cls in results.get("capture_chain", [])[:1]:
-        add("sheet controller %s" % pretty(cls), cls, None)
+        add("media capture %s" % pretty(cls), cls, None)
 
     if not anchors:
         return {}, ["nothing to check for reachability — shape half found no anchors"]
@@ -533,11 +573,10 @@ def report(results, failures, counts=None, reach_failures=()):
 
     chain = results.get("capture_chain")
     if chain:
-        print("[capture]  %s.%s -> %s.a -> %s.%s()"
-              % (pretty(chain[0]), SHEET_TWEET_FIELD, pretty(chain[1]), pretty(chain[2]),
-                 TWEET_ID_GETTER))
-        print("[capture]  hook %s.%s(FragmentManager)" % (pretty(chain[0]), SHEET_SHOW_METHOD))
-        print("[capture]  media %s type=%s" % (pretty(chain[3]), results.get("media_types", [])))
+        print("[capture]  hook %s.<init> (%d fields, all final)"
+              % (pretty(chain[0]), len(DATASPEC_FIELDS)))
+        print("[capture]  uri at field %s; builder %s"
+              % (DATASPEC_URI_FIELD, results.get("dataspec_builder", "unknown")))
     for site in results.get("capture_sites", [])[:8]:
         print("[capture]  built by %s" % site)
 
@@ -565,12 +604,28 @@ def _fixture():
     def f(name, type_, static=False):
         return {"name": name, "type": type_, "static": static}
 
+    # DataSpec and its Builder, for anchor 7. Both are present because the ambiguity between them
+    # is the thing the gate discriminates on: a fixture with only the spec could not show that the
+    # finality check is what separates them.
+    def dataspec_fields(final):
+        names = ("a", "b", "c", "d", "e", "f", "g", "h", "i")
+        return [{"name": n, "type": t, "static": False, "final": final}
+                for n, t in zip(names, DATASPEC_FIELDS)]
+
     row = SHARE_ROW_PKG + "a;"
     action = SHARESHEET_PKG + "t$g;"
     root = SHARESHEET_PKG + "t;"
     value_methods = [m(v, "Z" if v == "equals" else "I", []) for v in VALUE_TYPE_METHODS]
 
     return {
+        DATASPEC: {
+            "name": DATASPEC, "super": None, "interfaces": [],
+            "fields": dataspec_fields(True), "methods": [],
+        },
+        DATASPEC_BUILDER: {
+            "name": DATASPEC_BUILDER, "super": None, "interfaces": [],
+            "fields": dataspec_fields(False), "methods": [],
+        },
         CHOOSER_PKG + "j;": {
             "name": CHOOSER_PKG + "j;", "super": None, "interfaces": [],
             "fields": [f("a", COMPOSE_VIEW), f("b", ACTIVITY)],
@@ -667,7 +722,76 @@ def self_test():
     c["Lcom/twitter/share/api/m;"] = dict(c["Lcom/twitter/share/api/m;"], fields=[])
     cases.append(("no tweet field", c))
 
-    bad = 0
+    # --- anchor 7: the media capture chain -------------------------------------------------
+    #
+    # These run analyse_capture_chain, not analyse. Until 1.12 this gate had NO fixture cases at
+    # all: the chain it verified was structurally present in every APK, so it had never been red,
+    # and a gate that has never failed is indistinguishable from one that cannot.
+    #
+    # The healthy case is listed first and deliberately. The module's own field-shape predicate
+    # shipped with `byte[]` where reflection spells `[B`, making it ALWAYS FALSE -- it rejected the
+    # real DataSpec while still rejecting every decoy, so a suite of negative cases stayed green.
+    # Only a positive assertion catches that class of bug.
+    capture_cases = []
+
+    c = {k: dict(v) for k, v in good.items()}
+    capture_cases.append(("capture: healthy chain accepted", c, True, None))
+
+    # the package the module searches is renamed
+    c = {k: dict(v) for k, v in good.items()}
+    for k in (DATASPEC, DATASPEC_BUILDER):
+        del c[k]
+    capture_cases.append(("capture: media3 package gone", c, False, "package"))
+
+    # the field sequence drifts (one type changed)
+    c = {k: dict(v) for k, v in good.items()}
+    f = [dict(x) for x in c[DATASPEC]["fields"]]
+    f[3] = dict(f[3], type="Ljava/lang/String;")
+    c[DATASPEC] = dict(c[DATASPEC], fields=f)
+    capture_cases.append(("capture: field sequence drifted", c, False, "fields are"))
+
+    # the spec stops being fully final -- the discriminator against the Builder
+    c = {k: dict(v) for k, v in good.items()}
+    f = [dict(x) for x in c[DATASPEC]["fields"]]
+    f[0] = dict(f[0], final=False)
+    c[DATASPEC] = dict(c[DATASPEC], fields=f)
+    capture_cases.append(("capture: spec no longer final", c, False, "non-final"))
+
+    # the Builder becomes fully final too, so finality no longer discriminates
+    c = {k: dict(v) for k, v in good.items()}
+    c[DATASPEC_BUILDER] = dict(
+        c[DATASPEC_BUILDER],
+        fields=[dict(x, final=True) for x in c[DATASPEC_BUILDER]["fields"]],
+    )
+    capture_cases.append(("capture: builder became final too", c, False, "no longer discriminates"))
+
+    # the uri leaves field 0, which the hook reads positionally
+    c = {k: dict(v) for k, v in good.items()}
+    f = [dict(x) for x in c[DATASPEC]["fields"]]
+    f[0] = dict(f[0], type="J")
+    f[1] = dict(f[1], type="Landroid/net/Uri;")
+    c[DATASPEC] = dict(c[DATASPEC], fields=f)
+    capture_cases.append(("capture: uri moved off field a", c, False, None))
+
+    capture_bad = 0
+    for label, fixture, expect_ok, needle in capture_cases:
+        _r, fs = analyse_capture_chain(fixture)
+        if expect_ok:
+            if fs:
+                print("  NO-OP   %-32s -> rejected a healthy chain: %s" % (label, fs[0][:60]))
+                capture_bad += 1
+            else:
+                print("  ok      %-32s -> accepted" % label)
+        elif not fs:
+            print("  NO-OP   %-32s -> reported healthy; this check proves nothing" % label)
+            capture_bad += 1
+        elif needle and not any(needle in f for f in fs):
+            print("  NO-OP   %-32s -> failed for the wrong reason: %s" % (label, fs[0][:60]))
+            capture_bad += 1
+        else:
+            print("  ok      %-32s -> %s" % (label, fs[0][:64]))
+
+    bad = capture_bad
     for label, broken in cases:
         _r, fs = analyse(broken)
         if fs:
@@ -726,7 +850,9 @@ def self_test():
                     print("  NO-OP   %-32s -> expected %r, got %s" % (label, needle, rf))
                     bad += 1
 
-    total = len(cases) + extra
+    # capture_cases counts toward the total: leaving it out would report a smaller,
+    # flattering denominator and hide a capture case that had gone no-op.
+    total = len(cases) + len(capture_cases) + extra
     print("\nself-test: %d/%d checks can fail" % (total - bad, total))
     return 1 if bad else 0
 

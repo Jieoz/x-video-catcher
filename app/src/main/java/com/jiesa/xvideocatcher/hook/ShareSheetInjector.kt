@@ -4,56 +4,53 @@ import com.jiesa.xvideocatcher.DiagLog
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import java.lang.reflect.Method
-import java.lang.reflect.Modifier
 
 /**
- * Adds a download row to X's tweet action sheet, and handles taps on it.
+ * Adds a download row to X's live share sheet, and handles taps on it.
  *
- * ## Why this replaces searching for the tweet
+ * ## Why this targets `com.x.share.impl` and not the tweet action sheet
  *
- * Versions 1.5-1.10 hooked the Compose share sheet and then went looking for the tweet by walking
- * the object graph, because nothing on that path hands one over. Every device log ended
- * `exhausted=true`, which proves nothing either way.
+ * 1.11.0 hooked `com.twitter.tweet.action.legacy.e0`, chosen because cross-referencing found 57
+ * classes outside its package calling into the cluster. The device log answered flatly:
  *
- * The tweet action sheet is a different code path and it does not need searching: the controller
- * that builds the sheet *holds* the tweet. `com.twitter.tweet.action.legacy.e0` has the row list in
- * field `a` and the tweet in field `b`, and `e0.h(FragmentManager)` is the method that renders the
- * list. So at the moment `h` is entered, both the rows and the tweet are in hand -- no graph walk,
- * no budget, no ambiguity.
+ *     sheet controller: 0 candidates in com.twitter.tweet.action.legacy
  *
- * ## Why e0 is trusted where 1.2-1.4's anchors were not
+ * The class is in the APK; it is never instantiated on the user's path. That sheet is a second,
+ * unused implementation, and static call sites cannot distinguish "reachable in the call graph"
+ * from "on the path the user actually walks" -- a distinction this module had already written down
+ * in [HostResolver.sheetOpen]'s comment and then ignored one anchor over.
  *
- * Those three releases hooked classes with **zero call sites in the shipped APK**: they resolved,
- * they hooked, they never fired, and shape checks could not tell because dead code has the right
- * shape. `e0` was cleared differently, by cross-referencing the release APK:
+ * What the same log proved live, every time, is the Compose sheet:
  *
- *  - `e0.h` has 3 direct call sites (`legacy.d0` x2, `legacy.o1` x1).
- *  - Direct callers were not accepted as sufficient -- all three are in the same package, and a
- *    cluster of dead classes calling each other looks exactly like this. Walking callers upward
- *    found **57 classes outside** `tweet.action.legacy` entering the cluster, including
- *    `com.twitter.timeline.g`, `com.twitter.tweetdetail.q1` and `com.twitter.app.gallery.j1`.
+ *     PROBE resolve row=com.x.models.share.a
+ *     PROBE resolve provider=com.x.share.impl.c.a
+ *     PROBE rows built: 12 row(s), arg=https://x.com/i/status/...
+ *     PROBE   list mutable=true
  *
- * So the sheet is reached from the timeline, the tweet detail screen and the gallery: the three
- * places a user actually opens it from.
+ * So the anchors here are the ones [SharePathProbe] exercised on the device: the row provider that
+ * builds the list, and the dispatch points that receive a tap. No new resolver is introduced -- they
+ * come from [HostResolver], the same definitions the release gate verifies against a real APK.
+ *
+ * ## Where the media comes from
+ *
+ * Not from a tweet. The provider is handed a **status URL**, and every graph walk the 1.11 probe ran
+ * from it reported `media extracted: 0 item(s)` -- there is no tweet object on this path, which is
+ * what defeated 1.5 through 1.11.
+ *
+ * [MediaSpy] supplies it instead, by reading the URL the host's own player already resolved. The
+ * host cannot play a video without producing a playable URL, so by the time the user opens the share
+ * sheet on a video they were watching, the address is in the process.
  *
  * ## How the row is built
  *
- * The host's own row model is `com.twitter.ui.dialog.actionsheet.b`, whose field `a` is the int id
- * that comes back on tap. Rather than construct one reflectively -- the constructor takes 11
- * arguments and their order is obfuscation-dependent -- the module **clones an existing row** and
- * overwrites its id and label. A clone is guaranteed to be the right type, with every field the
- * host expects populated; there is no constructor signature to get wrong.
- *
- * ## How a tap gets back
- *
- * Taps arrive at `com.twitter.app.common.dialog.o.u(int)`, implemented by `BaseDialogFragment`
- * (21 call sites). The module hooks `u`, claims the call when the id is [ROW_ID], and lets every
- * other id through untouched.
+ * By cloning an existing row and overwriting its label, via [HostRow]. The host's row type
+ * (`com.x.models.share.a`) is a 5-field value class whose constructor argument order is
+ * obfuscation-dependent; a clone is guaranteed to be the right type with every field populated.
  *
  * ## Failure policy
  *
- * Every hook body is wrapped, and a failure removes the row rather than propagating: a missing
- * download entry is recoverable, X crashing in the user's hands is not.
+ * Every hook body is wrapped. A failure drops the row rather than propagating: a missing download
+ * entry is recoverable, X crashing in the user's hands is not.
  */
 internal class ShareSheetInjector(
     private val classLoader: ClassLoader,
@@ -62,26 +59,46 @@ internal class ShareSheetInjector(
 ) {
 
     fun install() {
-        val controller = HostResolver.sheetController(classLoader)
-        if (controller == null) {
-            DiagLog.line("$MARK controller MISS -- no download row this session")
-            DiagLog.flushNow()
-            return
-        }
-        val show = HostResolver.sheetShowMethod(controller)
-        if (show == null) {
-            DiagLog.line("$MARK show-method MISS on ${controller.name}")
+        val provider = HostResolver.rowProvider(classLoader)
+        if (provider == null) {
+            DiagLog.line("$MARK row-provider MISS -- no download row this session")
             DiagLog.flushNow()
             return
         }
 
-        DiagLog.line("${ProbeMarkers.INJECT_RESOLVE}${controller.name} show=${show.name}")
+        val rowClass = HostResolver.rowClass(classLoader)
+        if (rowClass == null) {
+            DiagLog.line("$MARK row-class MISS -- cannot build a row")
+            DiagLog.flushNow()
+            return
+        }
 
-        installHook("sheet-show") { hookShow(show) }
-        installHook("row-click") { hookClick() }
+        val actionRoot = HostResolver.actionClass(classLoader, rowClass)
+        val dispatch = if (actionRoot == null) {
+            emptyList()
+        } else {
+            HostResolver.dispatchPoints(classLoader, actionRoot)
+        }
+        if (dispatch.isEmpty()) {
+            // Without a tap handler the row would appear and do nothing, which is worse than no row:
+            // the user would think the module works and blame the download.
+            DiagLog.line("$MARK dispatch MISS -- row suppressed to avoid a dead entry")
+            DiagLog.flushNow()
+            return
+        }
+
+        DiagLog.line(
+            "${ProbeMarkers.INJECT_RESOLVE}provider=${provider.declaringClass.name}.${provider.name} "
+                + "row=${rowClass.name} dispatch=${dispatch.size}",
+        )
+
+        installHook("row-append") { hookRowProvider(provider, rowClass) }
+        for (point in dispatch) {
+            installHook("tap-${point.method.declaringClass.name}") { hookDispatch(point) }
+        }
 
         DiagLog.flushNow()
-        XposedBridge.log("XVC: injector armed on ${controller.name}.${show.name}")
+        XposedBridge.log("XVC: injector armed on ${provider.declaringClass.name}")
     }
 
     private fun installHook(name: String, block: () -> Unit) {
@@ -94,40 +111,32 @@ internal class ShareSheetInjector(
     }
 
     /**
-     * Appends the download row as the sheet is about to be shown.
+     * Appends the download row to the list the sheet renders from.
      *
-     * `before` rather than `after`: `h` copies the list into a builder and calls `toArray`, so a row
-     * added afterwards would never reach the rendered sheet.
+     * `after`, on the provider's return value: the probe proved that list is a mutable `ArrayList`
+     * at this exact point. Appending before it is built would have nothing to append to.
+     *
+     * The row is only added when [MediaSpy] holds something downloadable, so the entry cannot
+     * promise what the tap would fail to deliver.
      */
-    private fun hookShow(show: Method) {
-        XposedBridge.hookMethod(show, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+    private fun hookRowProvider(provider: Method, rowClass: Class<*>) {
+        XposedBridge.hookMethod(provider, object : XC_MethodHook() {
+            override fun afterHookedMethod(param: MethodHookParam) {
                 runCatching {
-                    val controller = param.thisObject ?: return
-                    val tweet = HostResolver.tweetFieldIn(controller.javaClass)
-                        ?.get(controller)
-                    if (tweet == null) {
-                        DiagLog.line("$MARK sheet opened, tweet field empty")
+                    val rows = param.result as? java.util.ArrayList<*>
+                    if (rows == null) {
+                        DiagLog.line("$MARK provider returned ${param.result?.javaClass?.name}")
                         return
                     }
 
-                    // Resolve media before touching the UI. A row is only worth adding if there is
-                    // something behind it, and this is the same extractor the download uses, so the
-                    // row cannot promise what the tap would fail to deliver.
-                    val media = TweetMedia.extract(tweet)
-                    if (media.isEmpty()) {
+                    val hit = MediaSpy.best()
+                    if (hit == null) {
+                        // Expected for a text-only tweet, and for a video the user has not played.
                         DiagLog.line(ProbeMarkers.INJECT_NO_MEDIA)
                         return
                     }
 
-                    val rows = rowListOf(controller)
-                    if (rows == null) {
-                        DiagLog.line("$MARK row list not found on ${controller.javaClass.name}")
-                        return
-                    }
-                    val template = rows.firstOrNull {
-                        it != null && it.javaClass.name.startsWith(ROW_PACKAGE)
-                    }
+                    val template = rows.firstOrNull { it != null && rowClass.isInstance(it) }
                     if (template == null) {
                         DiagLog.line("$MARK no row template (list size=${rows.size})")
                         return
@@ -138,6 +147,7 @@ internal class ShareSheetInjector(
                         DiagLog.line("$MARK no host context, cannot label the row")
                         return
                     }
+
                     val row = HostRow.cloneWithLabel(
                         template, ROW_ID, strings.downloadLabel(context),
                     )
@@ -147,70 +157,65 @@ internal class ShareSheetInjector(
                     }
 
                     @Suppress("UNCHECKED_CAST")
-                    (rows as MutableList<Any>).add(row)
-                    // The tweet, not the extracted media: [HostDownloader] extracts from the tweet
-                    // itself, and keeping one extraction path means the row can never promise
-                    // something the download resolves differently.
-                    pending = tweet
+                    (rows as java.util.ArrayList<Any>).add(row)
                     DiagLog.line(
-                        "${ProbeMarkers.INJECT_ROW_ADDED} (${media.size} item(s), "
-                            + "list size=${rows.size})",
+                        "${ProbeMarkers.INJECT_ROW_ADDED} (${hit.kind}, list size=${rows.size})",
                     )
                     DiagLog.flushNow()
                 }.onFailure {
-                    DiagLog.line("$MARK sheet-show failed: $it")
+                    DiagLog.line("$MARK row-append failed: $it")
                 }
             }
         })
-    }
-
-    /** The row list held by the controller: its only `List` field. */
-    private fun rowListOf(controller: Any): MutableList<*>? {
-        val f = HostShapes.uniqueFieldOfType(controller.javaClass, List::class.java)
-            ?: return null
-        return runCatching { f.get(controller) as? MutableList<*> }.getOrNull()
     }
 
     /**
      * Claims a tap on the injected row.
      *
-     * Hooked on the interface's implementor rather than the interface: `u` is declared on
-     * `dialog.o` but dispatched virtually, and hooking an interface method installs nothing.
+     * Every dispatch point is hooked, not just one: the probe found two
+     * (`com.x.share.impl.b.h` and `com.x.dms.components.sharesheet.j.h`), and an implementation that
+     * does not delegate to the other is its own entry point. Hooking one would work until the user
+     * opened the sheet from the other screen.
+     *
+     * Identification is by label rather than by id: the host's action carries the row it was built
+     * from, and the clone's label is the field this module set. Comparing the label to the one it
+     * wrote is what makes a foreign row impossible to claim by accident.
      */
-    private fun hookClick() {
-        val fragment = classLoader.loadClass(HostClasses.DIALOG_FRAGMENT)
-        val u = fragment.declaredMethods.firstOrNull { m ->
-            m.name == CLICK_METHOD &&
-                m.parameterTypes.size == 1 &&
-                m.parameterTypes[0] == Int::class.javaPrimitiveType
-        } ?: throw NoSuchMethodException("$CLICK_METHOD(int) on ${fragment.name}")
-
-        XposedBridge.hookMethod(u, object : XC_MethodHook() {
+    private fun hookDispatch(point: HostResolver.DispatchPoint) {
+        XposedBridge.hookMethod(point.method, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                val id = param.args.getOrNull(0) as? Int ?: return
-                if (id != ROW_ID) return
                 runCatching {
-                    val tweet = pending
-                    // Consume before doing the work: a double tap must not download twice, and the
-                    // sheet is dismissed either way.
-                    pending = null
-                    val context = XVideoCatcherModule.appContext
-                    if (tweet == null || context == null) {
-                        DiagLog.line("$MARK tap with nothing pending")
-                        return
-                    }
+                    val action = param.args.getOrNull(0) ?: return
+                    val context = XVideoCatcherModule.appContext ?: return
+                    if (!isOurs(action, context)) return
+
                     DiagLog.line(ProbeMarkers.INJECT_TAP)
-                    // Swallow the host's own handling of an id it does not know. Without this the
-                    // host would fall through to its default branch for an unrecognised id.
+                    // Swallow the host's handling: it has no branch for a row it did not build.
                     param.result = null
-                    downloader.download(context, tweet)
+                    downloader.downloadCaptured(context)
                 }.onFailure {
                     DiagLog.line("$MARK tap failed: $it")
-                    param.result = null
                 }
                 DiagLog.flushNow()
             }
         })
+    }
+
+    /**
+     * Whether a dispatched action carries the injected row.
+     *
+     * Compares against the label this module wrote, found on any row-typed field reachable from the
+     * action. A host row can never match: the label is the module's own localised string.
+     */
+    private fun isOurs(action: Any, context: android.content.Context): Boolean {
+        val wanted = strings.downloadLabel(context)
+        return runCatching {
+            action.javaClass.declaredFields.any { f ->
+                f.isAccessible = true
+                val v = f.get(action) ?: return@any false
+                HostRow.labelOf(v) == wanted
+            }
+        }.getOrDefault(false)
     }
 
     private companion object {
@@ -218,26 +223,13 @@ internal class ShareSheetInjector(
         const val MARK = "INJECT"
 
         /**
-         * Id for the injected row.
+         * Id written into the cloned row.
          *
          * Large and arbitrary to avoid colliding with the host's own ids, which are small ordinals.
-         * A collision would route the host's action to this module or vice versa.
+         * Tap identification is by label rather than by this value -- the live action does not carry
+         * an int id -- but a distinct id keeps the clone from impersonating a host row anywhere the
+         * host compares them.
          */
         const val ROW_ID = 0x58564331  // "XVC1"
-
-        const val ROW_PACKAGE = "com.twitter.ui.dialog.actionsheet"
-
-        /** The item-click callback on `dialog.o`: `u(int)`, 21 call sites in 12.13.0-release.0. */
-        const val CLICK_METHOD = "u"
-
-        /**
-         * The tweet whose sheet is currently open, waiting for a tap.
-         *
-         * One slot, not a map keyed by row id: only one sheet is on screen at a time, and it is
-         * refreshed on every open. Volatile because the sheet is built on the UI thread and the
-         * value is read again on the tap.
-         */
-        @Volatile
-        private var pending: Any? = null
     }
 }

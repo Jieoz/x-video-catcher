@@ -189,10 +189,19 @@ class Dex:
                     idx = 0
                     for _ in range(count):
                         delta, off = read_uleb128(self.raw, off)
-                        _access, off = read_uleb128(self.raw, off)
+                        access, off = read_uleb128(self.raw, off)
                         idx += delta
                         _owner, ftype, fname = self.field_id(idx)
-                        fields.append({"name": fname, "type": ftype, "static": static})
+                        # ACC_FINAL (0x10) is carried because callers discriminate a value type
+                        # from its builder by it: the two declare identical field sequences, and
+                        # finality is the only structural difference. This was dropped on the
+                        # floor here, so every field read back as non-final -- a gate asserting
+                        # finality against a real APK failed on a correct host while a
+                        # hand-written fixture that set the key itself passed.
+                        fields.append({
+                            "name": fname, "type": ftype, "static": static,
+                            "final": bool(access & 0x10),
+                        })
 
                 for count in (n_direct, n_virtual):
                     idx = 0

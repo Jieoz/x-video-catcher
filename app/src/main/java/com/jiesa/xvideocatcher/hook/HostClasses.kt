@@ -36,13 +36,6 @@ internal object HostClasses {
     /** Build this module's anchors were read from. Logged so a mismatch is visible in logcat. */
     const val VERIFIED_HOST_VERSION = "12.13.0-release.0"
 
-    /**
-     * The one host name used verbatim, and the only one that can be.
-     *
-     * X instantiates this fragment by name, so R8 has to keep it. It is retained because it still
-     * anchors the media model lookups below; the share sheet itself no longer routes through it.
-     */
-    const val DIALOG_FRAGMENT = "com.twitter.app.common.dialog.BaseDialogFragment"
 
     /** Tweet wrapper (`Parcelable`). Field `a` is the tweet body, field `c` a nested quote. */
     const val TWEET_WRAPPER = "com.twitter.model.core.e"
@@ -98,14 +91,4 @@ internal object HostClasses {
 
     // ---- tweet action sheet (where the download row is injected) ------------
 
-    /**
-     * The tweet action sheet's controller package: `legacy.e0` holds the rows in `a` and the tweet
-     * in `b`, and `e0.h(FragmentManager)` renders them.
-     *
-     * This is the path 1.11.0 injects into, and it is the answer to the question versions 1.5-1.10
-     * could not settle by graph search: the controller *holds* the tweet, so there is nothing to
-     * search for. Cleared for reachability with a disassembler before any code was written against
-     * it -- 3 direct call sites on `h`, and 57 classes outside this package entering the cluster.
-     */
-    const val TWEET_ACTION_PACKAGE = "com.twitter.tweet.action.legacy"
 }

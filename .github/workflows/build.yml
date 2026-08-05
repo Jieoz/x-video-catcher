@@ -201,12 +201,12 @@ jobs:
           }
           check DownloadTarget photoSpec,videoSpec
           check MediaSaver save
-          check HostDownloader download
+          check HostDownloader download,downloadCaptured
           check ModuleStrings downloadLabel,startedLabel,successLabel,failureLabel,noMediaLabel
-          # 1.11.0 ships the injector again, against the tweet action sheet rather than the family
-          # 1.2-1.4 hooked. Its anchor was cleared for reachability before any code was written
-          # against it (3 direct call sites on e0.h, 57 classes outside tweet.action.legacy entering
-          # the cluster), which is the check those three releases lacked.
+          # 1.12.0 injects into the live Compose share sheet and captures media from the player.
+          # MediaSpy is the whole point of this release: without it the row has nothing to download.
+          # downloadCaptured is the path that does not need a tweet object (the live sheet has none).
+          check MediaSpy install,best
           check ShareSheetInjector install
           # Row construction. The row is cloned from one the host built rather than constructed, so
           # no obfuscated constructor signature is guessed; a missing HostRow means the injector
@@ -373,12 +373,29 @@ jobs:
           done
 
       # A host APK is ~200MB and cannot live in the repo, so the step above skips on most runs.
-      # Say so out loud: a silently skipped anchor gate reads exactly like a passing one in the
-      # checks list, and that is the shape of failure this project keeps paying for.
+      # A warning was the whole coverage story until 1.12, and warnings do not block: 1.11.0
+      # shipped with this gate skipped, on an anchor the device then proved was never instantiated.
+      #
+      # So the fingerprint gate runs UNCONDITIONALLY and is allowed to fail the build. It cannot
+      # re-derive reachability without the APK -- what it asserts is that the module and verifier
+      # constants still agree with the measurement that was taken against a real host, which is
+      # what catches a later edit quietly diverging from the verified shape.
+      - name: Verify the module agrees with the measured host fingerprint
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/tools/verify_fingerprint.py"
+
+      # And the gate above is itself ablated, because a gate that has never been red is
+      # indistinguishable from one that cannot fail -- the lesson anchor 7 already taught here.
+      - name: Prove the fingerprint gate is load-bearing
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/tools/ablate_fingerprint.py"
+
       - name: Report host-anchor coverage
         if: hashFiles('host/**/*.apk') == ''
         run: |
-          echo "::warning title=Host anchors unverified::No host/*.apk present, so anchor 7 (capture chain) was NOT checked against a real build. Host class names are obfuscated per channel and per release; verify locally with tools/verify_host_anchors.py plus tools/ablate_capture.py before shipping."
+          echo "::warning title=Host reachability unverified::No host/*.apk present, so reachability (is the DataSpec constructor actually built, and by media3) was NOT re-derived on this run. The fingerprint gate did assert the module still matches the last real measurement. Re-measure with tools/fingerprint_host.py when the host bundle changes."
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
