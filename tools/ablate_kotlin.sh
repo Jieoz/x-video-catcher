@@ -1,19 +1,21 @@
 #!/bin/bash
-# Ablate each clause of isSheetControllerShape and HostRow's label rule, and require the suite to
-# go RED for each. A new test that passes on its first run is indistinguishable from one that
-# asserts nothing; this is what tells them apart.
+# Ablate each load-bearing clause of HostRow's label/id rules and require the suite to go RED.
+#
+# isSheetControllerShape ablations lived here in 1.11.0; that predicate was retired with the
+# unused tweet-action controller. Keeping those anchors would count ANCHOR-MISS as "not
+# load-bearing" and fail a correct build -- the opposite of what a gate is for.
 #
 # Each ablation is a single-clause edit, applied to a copy, tested, then reverted. The expectation
 # is failure: an ablation that leaves the suite green means that clause is decoration.
 set -u
 
 REPO="${GITHUB_WORKSPACE:-$(cd "$(dirname "$0")/.." && pwd)}"
-RES=$REPO/app/src/main/java/com/jiesa/xvideocatcher/hook/HostResolver.kt
 ROW=$REPO/app/src/main/java/com/jiesa/xvideocatcher/hook/HostRow.kt
+SPY=$REPO/app/src/main/java/com/jiesa/xvideocatcher/hook/MediaSpy.kt
 
-cp "$RES" /tmp/HostResolver.orig
 cp "$ROW" /tmp/HostRow.orig
-restore() { cp /tmp/HostResolver.orig "$RES"; cp /tmp/HostRow.orig "$ROW"; }
+cp "$SPY" /tmp/MediaSpy.orig
+restore() { cp /tmp/HostRow.orig "$ROW"; cp /tmp/MediaSpy.orig "$SPY"; }
 trap restore EXIT
 
 run_suite() {
@@ -48,28 +50,6 @@ PY
   fi
 }
 
-echo "=== ablating isSheetControllerShape ==="
-
-# The single-List clause: accept any number of Lists.
-ablate "single-List clause" "$RES" \
-  'if (fields.count { List::class.java.isAssignableFrom(it.type) } != 1) return false' \
-  'if (fields.none { List::class.java.isAssignableFrom(it.type) }) return false'
-
-# The tweet clause: drop it entirely.
-ablate "tweet-present clause" "$RES" \
-  'if (fields.none { isTweetModel(it.type) }) return false' \
-  'if (false) return false'
-
-# The show-method clause: accept anything.
-ablate "show-method clause" "$RES" \
-  'return showMethodOf(cls) != null' \
-  'return true'
-
-# The void-return clause on the show method.
-ablate "void-return clause" "$RES" \
-  'm.returnType == Void.TYPE' \
-  'true'
-
 echo "=== ablating HostRow ==="
 
 # The scribe-key exclusion: choose the longest String outright.
@@ -99,6 +79,18 @@ ablate "blank-label exclusion" "$ROW" \
 ablate "id assignment" "$ROW" \
   'idField.setInt(copy, id)' \
   'idField.setInt(copy, idField.getInt(copy))'
+
+echo "=== ablating MediaSpy ==="
+
+# Finality is what separates DataSpec from its Builder (identical field types, no finals).
+ablate "finality discriminator" "$SPY" \
+  'return fields.all { Modifier.isFinal(it.modifiers) }' \
+  'return true'
+
+# The reflection spelling of byte[] is [B. Writing byte[] makes the predicate always false.
+ablate "byte-array reflection name" "$SPY" \
+  '"[B", "java.util.Map"' \
+  '"byte[]", "java.util.Map"'
 
 restore
 echo
