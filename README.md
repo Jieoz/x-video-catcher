@@ -8,21 +8,17 @@ Everything runs inside X's process. There is no activity, no service, no backgro
 no launcher icon — the APK exists only to be loaded into X by LSPosed. Installing it and opening
 it does nothing by design; the entry appears in X.
 
-> ### 1.13.0 puts the download row on the path the probe already proved
+> ### 1.14.0 builds the download row the way the live model actually is
 >
-> 1.12.0's device log closed two questions and opened one:
+> 1.13 fixed dispatch (`action.superclass`) and progressive selection. The device then logged
+> `INJECT row clone failed from com.x.models.share.a` on every share: that row is an all-`final`
+> data class with **no int id** and no usable `Object.clone` / no-arg constructor. The old clone
+> path required all three, so the row never entered the list.
 >
-> 1. **MediaSpy works.** `MEDIASPY armed on androidx.media3.datasource.j.<init>` and real
->    `video.twimg.com` URLs, including complete progressive files
->    (`.../vid/avc1/0/0/<WxH>/<id>.mp4`) alongside HLS masters and `.m4s` segments.
-> 2. **The download row never appeared.** The injector called `dispatchPoints` with the concrete
->    action subtype (`t$g`); the live methods take the sealed parent (`t`). Same process, same
->    second: probe reported `dispatch=2 point(s)`, injector logged
->    `FATAL no dispatch (g)->void found` and suppressed the row. 1.13 uses `action.superclass`,
->    the same root SharePathProbe already used.
-> 3. **What to save.** Prefer the complete progressive `.mp4` over an HLS master when both are
->    captured; ignore `.m4s` segments (not a playable file on their own). Still no HLS remux —
->    progressive is present on the measured path.
+> 1.14 reflects the data-class constructor, copies the template's fields, overrides only the
+> visible label and the package String (to `com.jiesa.xvideocatcher`), and appends. Media still
+> comes from MediaSpy progressive `.mp4`.
+
 
 ## Target
 

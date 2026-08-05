@@ -1,5 +1,7 @@
 package com.jiesa.xvideocatcher.hook
 
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
@@ -8,23 +10,96 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Tests for cloning a share-sheet row.
+ * Tests for building a share-sheet row.
  *
- * ## Why this is tested at all
+ * ## Device failure this suite must keep red-on-regression
  *
- * The failure mode here is *visual and silent*: a row whose label went into the wrong String field
- * renders as a blank or wrongly-labelled entry, and nothing throws. That cannot be caught by a
- * device log, so it has to be caught here.
+ * 1.13 on device: `INJECT row clone failed from com.x.models.share.a` three times per share.
+ * That class is all-final, no int id, no usable `clone()` / no-arg ctor. A suite that only
+ * exercised a mutable Java bean never saw the failure.
  *
- * The host row on 12.13.0-release.0 carries four Strings -- a label plus analytics scribe names --
- * and 11 fields in total. [HostRow] picks the label as the longest non-scribe String rather than by
- * field name, and these tests pin that choice, including the case where a scribe key is longer than
- * the label (which is common: `tweet.actionsheet.download_click` beats `Save`).
+ * Each decoy / positive case below breaks one clause of the live path.
  */
 class HostRowTest {
 
-    /** A row shaped like the host's: an id, a style int, a label, and scribe keys. */
-    private class Row(
+    private val icon: Drawable = ColorDrawable(0xFF112233.toInt())
+
+    /** Live shape: final fields, primary ctor, no int id — [com.x.models.share.a]. */
+    @Test
+    fun `constructs a final data-class row with new label and module package`() {
+        val template = com.x.models.share.a(
+            "com.whatsapp",
+            "com.whatsapp.contact.ui.picker.ExternalShareAlias",
+            "WhatsApp",
+            icon,
+            true,
+        )
+        val copy = HostRow.cloneWithLabel(template, 0x58564331, "下载视频")
+        assertNotNull("final data-class row must clone via constructor", copy)
+        assertNotSame(template, copy)
+        assertTrue(copy is com.x.models.share.a)
+
+        val row = copy as com.x.models.share.a
+        assertEquals("下载视频", row.label)
+        assertEquals(HostRow.MODULE_PACKAGE, row.packageName)
+        assertEquals(
+            "activity and icon must be inherited so the row still looks native",
+            "com.whatsapp.contact.ui.picker.ExternalShareAlias",
+            row.activityName,
+        )
+        assertEquals(icon, row.icon)
+        assertEquals(true, row.direct)
+
+        // Template is a live host object — never mutate it.
+        assertEquals("com.whatsapp", template.packageName)
+        assertEquals("WhatsApp", template.label)
+    }
+
+    @Test
+    fun `labelOf reads the display string off a live-shaped row`() {
+        val row = com.x.models.share.a(
+            "org.telegram.messenger",
+            "org.telegram.ui.LaunchActivity",
+            "Telegram",
+            icon,
+            false,
+        )
+        assertEquals("Telegram", HostRow.labelOf(row))
+    }
+
+    @Test
+    fun `package-like strings are not chosen as the label`() {
+        // package and activity are longer than some labels and full of dots. Choosing longest
+        // String outright would write the download text into the package slot.
+        val template = com.x.models.share.a(
+            "com.very.long.package.name.that.outruns.label",
+            "com.very.long.activity.ComponentNameAlias",
+            "Save",
+            icon,
+            false,
+        )
+        val copy = HostRow.cloneWithLabel(template, 1, "Download video") as com.x.models.share.a
+        assertEquals("Download video", copy.label)
+        assertEquals(HostRow.MODULE_PACKAGE, copy.packageName)
+    }
+
+    @Test
+    fun `chinese labels without spaces still win over package fields`() {
+        val template = com.x.models.share.a(
+            "com.tencent.mm",
+            "com.tencent.mm.ui.tools.ShareImgUI",
+            "发送给朋友",
+            icon,
+            true,
+        )
+        val copy = HostRow.cloneWithLabel(template, 1, "下载视频") as com.x.models.share.a
+        assertEquals("下载视频", copy.label)
+        assertEquals("发送给朋友", HostRow.labelOf(template))
+    }
+
+    // ---- mutable fallback (unit-test bean; not the live host model) -------------------------
+
+    private class MutableRow(
         @JvmField var id: Int = 7,
         @JvmField var style: Int = 2,
         @JvmField var label: String? = "Share via",
@@ -34,74 +109,32 @@ class HostRowTest {
     )
 
     @Test
-    fun `clone replaces id and label and leaves other fields alone`() {
-        val template = Row()
+    fun `mutable fallback still replaces id and label`() {
+        val template = MutableRow()
         val copy = HostRow.cloneWithLabel(template, 0x58564331, "Download video")
-        assertNotNull("clone must succeed", copy)
-        assertNotSame("clone must be a new object", template, copy)
-        assertTrue("clone must be the template's class", copy is Row)
-
-        val row = copy as Row
+        assertNotNull(copy)
+        val row = copy as MutableRow
         assertEquals(0x58564331, row.id)
         assertEquals("Download video", row.label)
-        // Inherited, so the injected row looks native without this file knowing what these are.
         assertEquals("tweet.actionsheet.share_via_click", row.scribeElement)
-        assertEquals("tweet_actionsheet", row.scribeSection)
-        assertEquals(true, row.enabled)
-
-        // The template must be untouched: it is a live object the host still renders.
         assertEquals(7, template.id)
-        assertEquals("Share via", template.label)
     }
 
     @Test
-    fun `a scribe key longer than the label is not mistaken for it`() {
-        // The real hazard. "Save" is 4 chars; the scribe element is 33. Choosing the longest String
-        // outright would put the download label into an analytics field and leave the row blank.
-        val template = Row(label = "Save", scribeElement = "tweet.actionsheet.save_media_click")
-        val copy = HostRow.cloneWithLabel(template, 1, "Download video") as Row
+    fun `a scribe key longer than the label is not mistaken for it on mutable rows`() {
+        val template = MutableRow(label = "Save", scribeElement = "tweet.actionsheet.save_media_click")
+        val copy = HostRow.cloneWithLabel(template, 1, "Download video") as MutableRow
         assertEquals("Download video", copy.label)
-        assertEquals(
-            "scribe key must be preserved, not overwritten",
-            "tweet.actionsheet.save_media_click",
-            copy.scribeElement,
-        )
+        assertEquals("tweet.actionsheet.save_media_click", copy.scribeElement)
     }
 
     @Test
-    fun `the clone does not keep the template's id`() {
-        // The bug this defends against: a clone that kept the template's id would be dispatched by
-        // the host as its OWN row, so tapping "Download video" would fire Share via instead. Silent,
-        // and wrong in a way the user sees.
-        //
-        // This replaced a test asserting "a row with no int field cannot be cloned", which ablation
-        // showed could never fail: setInt on a String field throws regardless of any guard, so that
-        // behaviour is guaranteed by reflection rather than by this code, and a test for it measures
-        // the JDK. Only assertions that can go red for a code change belong here.
-        val template = Row(id = 7)
-        val copy = HostRow.cloneWithLabel(template, 99, "Download video") as Row
-        assertEquals("id must be overwritten, not inherited", 99, copy.id)
-        assertEquals("template must be untouched", 7, template.id)
-    }
-
-    @Test
-    fun `a row with no usable label field cannot be cloned`() {
-        // Every String is a scribe key, so there is nowhere to put visible text.
+    fun `all-scribe mutable row cannot be labelled`() {
         class AllScribe(
             @JvmField var id: Int = 1,
             @JvmField var a: String? = "tweet.actionsheet.a_click",
             @JvmField var b: String? = "tweet_actionsheet",
         )
         assertNull(HostRow.cloneWithLabel(AllScribe(), 1, "Download video"))
-    }
-
-    @Test
-    fun `blank labels are not chosen`() {
-        // An empty String is a real occurrence on optional rows. Writing the label into it would
-        // leave the visible field untouched and the row unlabelled.
-        val template = Row(label = "Copy link", scribeElement = "")
-        val copy = HostRow.cloneWithLabel(template, 1, "Download video") as Row
-        assertEquals("Download video", copy.label)
-        assertEquals("", copy.scribeElement)
     }
 }

@@ -166,11 +166,19 @@ internal class ShareSheetInjector(
                         return
                     }
 
-                    val row = HostRow.cloneWithLabel(
-                        template, ROW_ID, strings.downloadLabel(context),
-                    )
+                    val wanted = strings.downloadLabel(context)
+                    val row = HostRow.cloneWithLabel(template, ROW_ID, wanted)
                     if (row == null) {
-                        DiagLog.line("$MARK row clone failed from ${template.javaClass.name}")
+                        // 1.13 failed here on the live final data-class row. Naming the template
+                        // class alone was not enough to see why; field finality is the tell.
+                        val finals = template.javaClass.declaredFields.count {
+                            !java.lang.reflect.Modifier.isStatic(it.modifiers) &&
+                                java.lang.reflect.Modifier.isFinal(it.modifiers)
+                        }
+                        DiagLog.line(
+                            "$MARK row clone failed from ${template.javaClass.name} " +
+                                "(finalFields=$finals label=$wanted)",
+                        )
                         return
                     }
 
