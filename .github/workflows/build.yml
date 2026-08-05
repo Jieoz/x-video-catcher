@@ -248,11 +248,10 @@ jobs:
           # absence has to fail here instead of on a device. Only the internal entry point is
           # listed: the shape helpers below it are private and R8 inlines them, so gating them
           # would fail a correct build.
-          # sheetController and sheetShowMethod are the 1.11.0 additions: the anchors the download
-          # row is injected through. Their absence would leave a build that logs resolution and then
-          # never appends a row -- the exact shape of the 1.2-1.4 failure, and unreadable as such
-          # from a device.
-          check HostResolver rowClass,rowProvider,actionClass,dispatchPoints,sheetOpen,tweetFieldIn,isTweetModel,sheetController,sheetShowMethod
+          # 1.12.0 retired sheetController/sheetShowMethod: those named the unused tweet-action
+          # controller that had static call sites but zero live instantiations on the device path.
+          # The live sheet uses rowClass/rowProvider/dispatchPoints, and media comes from MediaSpy.
+          check HostResolver rowClass,rowProvider,actionClass,dispatchPoints,sheetOpen,tweetFieldIn,isTweetModel
 
       # The checker must be able to fail. A tool that reports success unconditionally is
       # indistinguishable from a passing gate, and this one has already been wrong once
