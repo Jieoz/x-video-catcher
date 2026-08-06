@@ -26,7 +26,11 @@ import java.lang.reflect.Modifier
  * **real, resolvable** `(package, activity)` — inventing `…Download` is dropped the same way as
  * inventing a package. Compose also keys on that pair, so it must be unique in the list.
  *
- * ## Live strategy (1.17)
+ * ## Live strategy (1.18) — see ShareSheetInjector: REPLACE a visible row, do not append.
+ *
+ * Historical 1.17 notes retained below for the free-ResolveInfo helper still used in tests.
+ *
+ * ## Free-ResolveInfo path (1.17, append — device proved UI still drops it)
  *
  * Keep the data-class constructor copy, but take **package, activity, and icon** from a
  * [ResolveInfo] that:
@@ -73,6 +77,19 @@ internal object HostRow {
             icon = identity.icon,
         )
     }
+
+    /**
+     * Build a row that **keeps** [template]'s package / activity / icon and only rewrites the
+     * label. Used by the 1.18 replace path: the sheet already accepted this identity, so the UI
+     * will render it; inventing a 13th identity (1.14–1.17) was always filtered after `row added`.
+     */
+    fun relabelOnly(template: Any, label: String): Any? = constructCopy(
+        template = template,
+        label = label,
+        packageName = null,
+        activityName = null,
+        icon = null,
+    )
 
     /**
      * Test / fallback entry: label-only rewrite on a mutable bean, or full construct with the

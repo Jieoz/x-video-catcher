@@ -100,6 +100,23 @@ class HostRowTest {
     }
 
     @Test
+    fun `relabelOnly keeps package and activity`() {
+        val template = com.x.models.share.a(
+            "com.whatsapp",
+            "com.whatsapp.contact.ui.picker.ExternalShareAlias",
+            "WhatsApp",
+            icon,
+            true,
+        )
+        val copy = HostRow.relabelOnly(template, "下载视频")
+        assertNotNull(copy)
+        val row = copy as com.x.models.share.a
+        assertEquals("下载视频", row.label)
+        assertEquals("com.whatsapp", row.packageName)
+        assertEquals("com.whatsapp.contact.ui.picker.ExternalShareAlias", row.activityName)
+    }
+
+    @Test
     fun `labelOf reads the display string off a live-shaped row`() {
         val row = com.x.models.share.a(
             "org.telegram.messenger",

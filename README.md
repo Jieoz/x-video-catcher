@@ -8,15 +8,16 @@ Everything runs inside X's process. There is no activity, no service, no backgro
 no launcher icon — the APK exists only to be loaded into X by LSPosed. Installing it and opening
 it does nothing by design; the entry appears in X.
 
-> ### 1.17.0 steals a free installed share target's identity
+> ### 1.18.0 replaces a visible row instead of appending a 13th
 >
-> 1.16 inserted without crashing (`INJECT row added … com.whatsapp | 下载视频` ×3, no process
-> restart) but still no visible button: inventing `…Download` as the activity is not a resolvable
-> component, so a later filter drops it the same way 1.14 dropped the module package.
+> 1.17 used a real free ResolveInfo (`com.android.bluetooth/… | 下载视频`) and logged
+> `INJECT row added … list size=13` four times with no crash and no button. Appending is the
+> wrong layer: the sheet only paints the host-built set.
 >
-> 1.17 queries `PackageManager` for `ACTION_SEND` targets, picks the first `(package, activity)`
-> **not already on the sheet**, and copies that identity (plus its icon) onto the cloned row.
-> Label stays 「下载视频」; tap is still claimed by label and the host launch is still swallowed.
+> 1.18 **replaces index 0** with a same-identity clone (package/activity/icon unchanged, label
+> 「下载视频」). That identity already passed every host filter. Tap still by label; host launch
+> still swallowed. Side effect: the original first target (usually WhatsApp) is missing on that
+> open of the sheet.
 
 
 ## Target

@@ -43,9 +43,10 @@ import java.lang.reflect.Method
  *
  * ## How the row is built
  *
- * By cloning an existing row and overwriting its label, via [HostRow]. The host's row type
- * (`com.x.models.share.a`) is a 5-field value class whose constructor argument order is
- * obfuscation-dependent; a clone is guaranteed to be the right type with every field populated.
+ * By **replacing** an existing visible row with a same-identity clone whose label is ours,
+ * via [HostRow.relabelOnly]. Appending a 13th row (1.14–1.17) always logged success and never
+ * appeared in the UI. The host's row type (`com.x.models.share.a`) is a 5-field value class;
+ * a constructor copy keeps every field the sheet already accepted.
  *
  * ## Failure policy
  *
@@ -167,26 +168,38 @@ internal class ShareSheetInjector(
                     }
 
                     val wanted = strings.downloadLabel(context)
-                    // 1.14–1.16: inventing package/activity (or reusing WhatsApp's pair) either
-                    // dropped the row or crashed Compose. Live path takes a free ResolveInfo.
-                    val row = HostRow.cloneForSheet(template, wanted, rows, context)
+                    // 1.14–1.17 all APPENDED a 13th row. Device always logged `row added` /
+                    // `list size=13` and never showed a button (1.17: real Bluetooth identity,
+                    // still invisible). The sheet only renders the host-built set; a post-hoc
+                    // append is dropped. REPLACE the first visible row in place: same
+                    // package/activity/icon the host already accepted, label only rewritten.
+                    // WhatsApp (or whoever is index 0) is temporarily missing on that sheet —
+                    // acceptable; tap is still claimed by label and host launch is swallowed.
+                    if (HostRow.labelOf(template) == wanted) {
+                        // Already replaced on a prior provider call this open.
+                        return
+                    }
+                    val row = HostRow.relabelOnly(template, wanted)
                     if (row == null) {
                         val finals = template.javaClass.declaredFields.count {
                             !java.lang.reflect.Modifier.isStatic(it.modifiers) &&
                                 java.lang.reflect.Modifier.isFinal(it.modifiers)
                         }
                         DiagLog.line(
-                            "$MARK row clone failed from ${template.javaClass.name} " +
-                                "(finalFields=$finals label=$wanted occupied=${rows.size})",
+                            "$MARK row relabel failed from ${template.javaClass.name} " +
+                                "(finalFields=$finals label=$wanted)",
                         )
                         return
                     }
 
                     @Suppress("UNCHECKED_CAST")
                     val list = rows as java.util.ArrayList<Any>
-                    // Front of the list: the sheet is a horizontal strip; index 0 is on-screen
-                    // without scrolling, and is the first place the user looks.
-                    list.add(0, row)
+                    val idx = list.indexOfFirst { it != null && rowClass.isInstance(it) }
+                    if (idx < 0) {
+                        DiagLog.line("$MARK replace MISS (no row slot)")
+                        return
+                    }
+                    list[idx] = row
                     val shown = runCatching {
                         val label = HostRow.labelOf(row)
                         val dotted = row.javaClass.declaredFields
@@ -203,7 +216,8 @@ internal class ShareSheetInjector(
                         "$pkg/$act | $label"
                     }.getOrElse { "?" }
                     DiagLog.line(
-                        "${ProbeMarkers.INJECT_ROW_ADDED} (${hit.kind}, list size=${list.size}, $shown)",
+                        "${ProbeMarkers.INJECT_ROW_ADDED} (REPLACE idx=$idx, ${hit.kind}, " +
+                            "list size=${list.size}, $shown)",
                     )
                     DiagLog.flushNow()
                 }.onFailure {

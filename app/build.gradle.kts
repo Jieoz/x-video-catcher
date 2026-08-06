@@ -13,8 +13,8 @@ android {
         // exercised — the module only ever runs inside that process.
         minSdk = 28
         targetSdk = 35
-        versionCode = 27
-        versionName = "1.17.0"
+        versionCode = 28
+        versionName = "1.18.0"
     }
 
     buildFeatures { buildConfig = true }
