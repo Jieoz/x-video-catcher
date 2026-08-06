@@ -26,7 +26,7 @@ class HostRowTest {
 
     /** Live shape: final fields, primary ctor, no int id — [com.x.models.share.a]. */
     @Test
-    fun `constructs a final data-class row with new label and module package`() {
+    fun `constructs a final data-class row with new label keeping package`() {
         val template = com.x.models.share.a(
             "com.whatsapp",
             "com.whatsapp.contact.ui.picker.ExternalShareAlias",
@@ -41,7 +41,7 @@ class HostRowTest {
 
         val row = copy as com.x.models.share.a
         assertEquals("下载视频", row.label)
-        assertEquals(HostRow.MODULE_PACKAGE, row.packageName)
+        assertEquals("com.whatsapp", row.packageName)
         assertEquals(
             "activity and icon must be inherited so the row still looks native",
             "com.whatsapp.contact.ui.picker.ExternalShareAlias",
@@ -80,7 +80,7 @@ class HostRowTest {
         )
         val copy = HostRow.cloneWithLabel(template, 1, "Download video") as com.x.models.share.a
         assertEquals("Download video", copy.label)
-        assertEquals(HostRow.MODULE_PACKAGE, copy.packageName)
+        assertEquals("com.very.long.package.name.that.outruns.label", copy.packageName)
     }
 
     @Test

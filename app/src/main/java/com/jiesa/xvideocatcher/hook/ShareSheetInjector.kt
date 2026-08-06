@@ -183,9 +183,25 @@ internal class ShareSheetInjector(
                     }
 
                     @Suppress("UNCHECKED_CAST")
-                    (rows as java.util.ArrayList<Any>).add(row)
+                    val list = rows as java.util.ArrayList<Any>
+                    // Front of the list: the sheet is a horizontal strip; index 0 is on-screen
+                    // without scrolling, and is the first place the user looks.
+                    list.add(0, row)
+                    val shown = runCatching {
+                        // Mirror SharePathProbe.describeRow without depending on its private helper.
+                        val label = HostRow.labelOf(row)
+                        val pkg = row.javaClass.declaredFields
+                            .asSequence()
+                            .filter { it.type == String::class.java }
+                            .mapNotNull { f ->
+                                f.isAccessible = true
+                                f.get(row) as? String
+                            }
+                            .firstOrNull { it.contains('.') && !it.contains(' ') }
+                        "$pkg | $label"
+                    }.getOrElse { "?" }
                     DiagLog.line(
-                        "${ProbeMarkers.INJECT_ROW_ADDED} (${hit.kind}, list size=${rows.size})",
+                        "${ProbeMarkers.INJECT_ROW_ADDED} (${hit.kind}, list size=${list.size}, $shown)",
                     )
                     DiagLog.flushNow()
                 }.onFailure {

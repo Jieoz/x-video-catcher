@@ -8,16 +8,16 @@ Everything runs inside X's process. There is no activity, no service, no backgro
 no launcher icon — the APK exists only to be loaded into X by LSPosed. Installing it and opening
 it does nothing by design; the entry appears in X.
 
-> ### 1.14.0 builds the download row the way the live model actually is
+> ### 1.15.0 keeps a real share-target package so the row can appear
 >
-> 1.13 fixed dispatch (`action.superclass`) and progressive selection. The device then logged
-> `INJECT row clone failed from com.x.models.share.a` on every share: that row is an all-`final`
-> data class with **no int id** and no usable `Object.clone` / no-arg constructor. The old clone
-> path required all three, so the row never entered the list.
+> 1.14 cloned `com.x.models.share.a` successfully (`INJECT row added … list size=13` ×3) but the
+> sheet still showed no download entry and never logged `INJECT_TAP`. The clone had rewritten the
+> package field to `com.jiesa.xvideocatcher`, which is not an installed share handler — the host
+> list is built from PackageManager targets and almost certainly drops unresolved packages on the
+> way to Compose.
 >
-> 1.14 reflects the data-class constructor, copies the template's fields, overrides only the
-> visible label and the package String (to `com.jiesa.xvideocatcher`), and appends. Media still
-> comes from MediaSpy progressive `.mp4`.
+> 1.15 only rewrites the visible label; package, activity, and icon stay on the template row.
+> Tap claiming is still by label and still swallows the host launch. The row is inserted at index 0.
 
 
 ## Target

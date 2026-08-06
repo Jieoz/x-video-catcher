@@ -25,14 +25,12 @@ import java.lang.reflect.Modifier
  * ## How a final data-class row is copied
  *
  * Reflect the single all-args constructor whose parameter types match the instance fields, feed it
- * the template's values, and override only:
+ * the template's values, and override **only the user-visible label** (longest non-scribe String).
  *
- *  - the user-visible label (longest non-scribe String);
- *  - the package-name String (the dotted one), replaced with [MODULE_PACKAGE] so a tap cannot
- *    resolve to a real third-party app if the host ever launches by package.
- *
- * Identification of our row on tap still uses the label ([labelOf]), which is what the live action
- * actually carries.
+ * Package and activity stay as on the template so the host's "is this a real share target?" filter
+ * still accepts the row. Tap claiming uses [labelOf], not package, and [ShareSheetInjector] swallows
+ * the host launch when the label matches — so a residual WhatsApp/Telegram package on the model
+ * does not open that app.
  */
 internal object HostRow {
 
@@ -82,14 +80,17 @@ internal object HostRow {
         if (fields.any { !Modifier.isFinal(it.modifiers) }) return null
 
         val labelField = labelFieldOf(template, fields) ?: return null
-        val packageField = packageFieldOf(template, fields, labelField)
+        // 1.14 rewrote the package String to MODULE_PACKAGE. Device log then showed
+        // `INJECT row added … list size=13` three times with zero visible row and zero
+        // INJECT_TAP: the Compose sheet almost certainly drops targets whose package is not
+        // an installed, resolvable share handler. Keep package + activity + icon from the
+        // template so the row survives that filter; identification on tap is still by label.
 
         val ctor = matchingConstructor(cls, fields) ?: return null
         val args = Array(fields.size) { i ->
             val f = fields[i]
             when {
                 f == labelField -> label
-                packageField != null && f == packageField -> MODULE_PACKAGE
                 else -> runCatching { f.get(template) }.getOrNull()
             }
         }
