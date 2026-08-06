@@ -25,22 +25,35 @@ import java.lang.reflect.Modifier
  * ## How a final data-class row is copied
  *
  * Reflect the single all-args constructor whose parameter types match the instance fields, feed it
- * the template's values, and override **only the user-visible label** (longest non-scribe String).
+ * the template's values, and override:
  *
- * Package and activity stay as on the template so the host's "is this a real share target?" filter
- * still accepts the row. Tap claiming uses [labelOf], not package, and [ShareSheetInjector] swallows
- * the host launch when the label matches — so a residual WhatsApp/Telegram package on the model
- * does not open that app.
+ *  - the user-visible label (longest non-scribe String);
+ *  - the **activity** String, rewritten to [MODULE_ACTIVITY] so the row's identity is unique.
+ *
+ * Package and icon stay as on the template. 1.14 rewrote the package to the module id and the row
+ * was dropped (not installed). 1.15 kept package **and** activity from WhatsApp and the sheet
+ * crashed on open: Compose keys share targets by package+activity, and a second WhatsApp entry
+ * is a duplicate key. Keeping an installed package while changing only the activity satisfies both
+ * constraints. Tap claiming is still by [labelOf]; [ShareSheetInjector] swallows the host launch.
  */
 internal object HostRow {
 
     /**
-     * Package written into the cloned row.
-     *
-     * Must not be an installed app the host could successfully launch. The module's own
-     * applicationId is ideal: present in the APK, never a share target the user has.
+     * Legacy constant from 1.14's package rewrite. Kept so older tests/docs that name it still
+     * compile; the live path no longer writes this into the row (it is not an installed share
+     * target and the sheet drops it).
      */
     const val MODULE_PACKAGE = "com.jiesa.xvideocatcher"
+
+    /**
+     * Activity component written into the cloned row.
+     *
+     * Must be unique among the other rows' (package, activity) pairs — that pair is what the
+     * Compose sheet keys on. Reusing the template's activity (1.15) produced two WhatsApp entries
+     * and crashed the host on share open. This string is never launched: the tap hook claims the
+     * row by label and sets `param.result = null` before the host starts an activity.
+     */
+    const val MODULE_ACTIVITY = "com.jiesa.xvideocatcher.Download"
 
     /**
      * A copy of [template] labelled [label], or null if it cannot be built.
@@ -80,17 +93,17 @@ internal object HostRow {
         if (fields.any { !Modifier.isFinal(it.modifiers) }) return null
 
         val labelField = labelFieldOf(template, fields) ?: return null
-        // 1.14 rewrote the package String to MODULE_PACKAGE. Device log then showed
-        // `INJECT row added … list size=13` three times with zero visible row and zero
-        // INJECT_TAP: the Compose sheet almost certainly drops targets whose package is not
-        // an installed, resolvable share handler. Keep package + activity + icon from the
-        // template so the row survives that filter; identification on tap is still by label.
+        // Package stays on the template (must be an installed app — 1.14's MODULE_PACKAGE was
+        // dropped). Activity is rewritten to MODULE_ACTIVITY so (package, activity) is unique —
+        // 1.15 kept both and crashed Compose with a duplicate WhatsApp key.
+        val activityField = activityFieldOf(template, fields, labelField)
 
         val ctor = matchingConstructor(cls, fields) ?: return null
         val args = Array(fields.size) { i ->
             val f = fields[i]
             when {
                 f == labelField -> label
+                activityField != null && f == activityField -> MODULE_ACTIVITY
                 else -> runCatching { f.get(template) }.getOrNull()
             }
         }
@@ -126,9 +139,32 @@ internal object HostRow {
      * without depending on the obfuscated field name.
      */
     private fun packageFieldOf(template: Any, fields: List<Field>, labelField: Field): Field? =
+        dottedStringFields(template, fields, labelField).firstOrNull()
+
+    /**
+     * The activity component field: the second dotted String after [labelField], or the only one
+     * that is not the package when package was identified first.
+     *
+     * On the live model the three Strings are package, activity, label in field order. Label is
+     * already excluded; of the two remaining dotted Strings, package is first and activity second.
+     */
+    private fun activityFieldOf(template: Any, fields: List<Field>, labelField: Field): Field? {
+        val dotted = dottedStringFields(template, fields, labelField)
+        return when {
+            dotted.size >= 2 -> dotted[1]
+            dotted.size == 1 -> dotted[0] // degenerate fixture; still rewrite so the key changes
+            else -> null
+        }
+    }
+
+    private fun dottedStringFields(
+        template: Any,
+        fields: List<Field>,
+        labelField: Field,
+    ): List<Field> =
         fields.filter { it.type == String::class.java && it != labelField }
-            .firstOrNull { f ->
-                val v = runCatching { f.get(template) as? String }.getOrNull() ?: return@firstOrNull false
+            .filter { f ->
+                val v = runCatching { f.get(template) as? String }.getOrNull() ?: return@filter false
                 v.contains('.') && !v.contains(' ')
             }
 
@@ -150,11 +186,8 @@ internal object HostRow {
         val labelField = labelFieldOf(template, fields) ?: return null
         runCatching { labelField.set(copy, label) }.onFailure { return null }
 
-        // Do NOT rewrite package-like Strings here. On the old actionsheet bean the long dotted
-        // fields are scribe keys, not launch packages; overwriting them was a unit-test failure and
-        // would have corrupted analytics if that model were still live. Package rewriting belongs
-        // only on the final data-class path ([constructCopy]), where the three Strings are
-        // package / activity / label.
+        // Do NOT rewrite dotted Strings here. On the old actionsheet bean they are scribe keys.
+        // Activity rewriting for uniqueness belongs only on the final data-class path.
         return copy
     }
 

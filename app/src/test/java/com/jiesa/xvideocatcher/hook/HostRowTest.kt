@@ -26,7 +26,7 @@ class HostRowTest {
 
     /** Live shape: final fields, primary ctor, no int id — [com.x.models.share.a]. */
     @Test
-    fun `constructs a final data-class row with new label keeping package`() {
+    fun `constructs a final data-class row with new label and unique activity`() {
         val template = com.x.models.share.a(
             "com.whatsapp",
             "com.whatsapp.contact.ui.picker.ExternalShareAlias",
@@ -43,8 +43,8 @@ class HostRowTest {
         assertEquals("下载视频", row.label)
         assertEquals("com.whatsapp", row.packageName)
         assertEquals(
-            "activity and icon must be inherited so the row still looks native",
-            "com.whatsapp.contact.ui.picker.ExternalShareAlias",
+            "activity must be unique so Compose does not key-collide with the template",
+            HostRow.MODULE_ACTIVITY,
             row.activityName,
         )
         assertEquals(icon, row.icon)
@@ -81,6 +81,7 @@ class HostRowTest {
         val copy = HostRow.cloneWithLabel(template, 1, "Download video") as com.x.models.share.a
         assertEquals("Download video", copy.label)
         assertEquals("com.very.long.package.name.that.outruns.label", copy.packageName)
+        assertEquals(HostRow.MODULE_ACTIVITY, copy.activityName)
     }
 
     @Test
@@ -94,7 +95,24 @@ class HostRowTest {
         )
         val copy = HostRow.cloneWithLabel(template, 1, "下载视频") as com.x.models.share.a
         assertEquals("下载视频", copy.label)
+        assertEquals("com.tencent.mm", copy.packageName)
+        assertEquals(HostRow.MODULE_ACTIVITY, copy.activityName)
         assertEquals("发送给朋友", HostRow.labelOf(template))
+    }
+
+    @Test
+    fun `injected activity differs from every template in a typical sheet`() {
+        // Reproduces the 1.15 crash shape: cloning WhatsApp with the same activity collides.
+        val templates = listOf(
+            com.x.models.share.a("com.whatsapp", "com.whatsapp.contact.ui.picker.ExternalShareAlias", "WhatsApp", icon, true),
+            com.x.models.share.a("org.telegram.messenger", "org.telegram.ui.LaunchActivity", "Telegram", icon, false),
+        )
+        val injected = HostRow.cloneWithLabel(templates[0], 1, "下载视频") as com.x.models.share.a
+        val keys = templates.map { it.packageName to it.activityName }.toSet()
+        assertTrue(
+            "injected (package, activity) must not collide with any host row",
+            (injected.packageName to injected.activityName) !in keys,
+        )
     }
 
     // ---- mutable fallback (unit-test bean; not the live host model) -------------------------
