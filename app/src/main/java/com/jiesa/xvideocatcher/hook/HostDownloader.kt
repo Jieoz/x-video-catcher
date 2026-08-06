@@ -7,6 +7,7 @@ import android.widget.Toast
 import com.jiesa.xvideocatcher.DiagLog
 import com.jiesa.xvideocatcher.MediaUrls
 import com.jiesa.xvideocatcher.DownloadTarget
+import com.jiesa.xvideocatcher.HlsVideo
 import com.jiesa.xvideocatcher.Http
 import com.jiesa.xvideocatcher.MediaSaver
 import de.robv.android.xposed.XposedBridge
@@ -45,34 +46,50 @@ internal class HostDownloader(private val strings: ModuleStrings) {
     fun downloadCaptured(context: Context): Boolean {
         val hit = MediaSpy.best()
         if (hit == null) {
-            DiagLog.line("download requested but nothing captured from the player")
+            DiagLog.line("download requested but no master playlist captured from the player")
             toast(context, strings.noMediaLabel(context))
             return false
         }
 
-        val item = toItem(hit)
-        if (item == null) {
-            // A master playlist needs the variant list resolved before anything can be fetched, and
-            // this build has no playlist parser. Logging the URL is deliberate: it turns "nothing
-            // happened" into a concrete next step instead of an invisible dead end.
-            DiagLog.line("captured ${hit.kind} is not directly downloadable: ${hit.url}")
+        val mediaId = MediaUrls.mediaId(hit.url)
+        if (mediaId == null) {
+            DiagLog.line("captured master has no media id: ${hit.url}")
             DiagLog.flushNow()
             toast(context, strings.noMediaLabel(context))
             return false
         }
 
-        DiagLog.line("download starting from capture: ${item.spec.fileName} <- ${item.url}")
+        DiagLog.line("download starting from capture: media=$mediaId <- ${hit.url}")
         toast(context, strings.startedLabel(context, 1))
         pool.execute {
-            val result = saveOne(context, item)
+            // Planning is a network fetch of the master, so it runs off the main thread with the
+            // transfer rather than before the toast.
+            val plan = HlsVideo.plan(hit.url)
+            if (plan == null) {
+                DiagLog.line("  FAILED $mediaId: master playlist unusable")
+                DiagLog.flushNow()
+                main.post { toast(context, strings.failureLabel(context)) }
+                return@execute
+            }
+            val v = plan.variant
+            DiagLog.line(
+                "  variant ${v.width}x${v.height} bw=${v.bandwidth} audio=${plan.audio?.groupId ?: "none"}",
+            )
+            val spec = DownloadTarget.videoSpec(mediaId, v.width, v.height)
+            val workDir = context.cacheDir
+            val result = runCatching {
+                MediaSaver.save(context, spec) { out -> HlsVideo.saveTo(plan, workDir, out) }
+            }.getOrElse { MediaSaver.Result.Failed(it.message ?: it.javaClass.simpleName, it) }
+
             val ok = result !is MediaSaver.Result.Failed
             when (result) {
-                is MediaSaver.Result.Saved -> DiagLog.line("  saved ${item.spec.fileName}")
+                is MediaSaver.Result.Saved ->
+                    DiagLog.line("  saved ${spec.fileName} (${result.bytes} bytes)")
                 is MediaSaver.Result.AlreadyExists ->
-                    DiagLog.line("  already on disk: ${item.spec.fileName}")
+                    DiagLog.line("  already on disk: ${spec.fileName}")
                 is MediaSaver.Result.Failed -> {
-                    DiagLog.line("  FAILED ${item.spec.fileName}: ${result.reason}")
-                    XposedBridge.log("XVC: ${item.url} failed: ${result.reason}")
+                    DiagLog.line("  FAILED ${spec.fileName}: ${result.reason}")
+                    XposedBridge.log("XVC: ${hit.url} failed: ${result.reason}")
                 }
             }
             DiagLog.flushNow()
@@ -82,21 +99,6 @@ internal class HostDownloader(private val strings: ModuleStrings) {
             }
         }
         return true
-    }
-
-    /**
-     * Names a captured URL, or returns null when it is not directly fetchable.
-     *
-     * Only progressive MP4 is handled: an HLS playlist is a list of segments, so saving it would
-     * produce a text file the user cannot play. Returning null keeps that honest rather than writing
-     * a broken download.
-     */
-    private fun toItem(hit: MediaSpy.Seen): HostMedia? {
-        if (hit.kind != MediaSpy.Kind.PROGRESSIVE_MP4) return null
-        val url = hit.url.substringBefore('?')
-        val mediaId = MediaUrls.mediaId(url) ?: return null
-        val (w, h) = MediaUrls.resolution(url) ?: (0 to 0)
-        return HostMedia(url = url, spec = DownloadTarget.videoSpec(mediaId, w, h))
     }
 
     fun download(context: Context, tweet: Any) {

@@ -143,11 +143,12 @@ internal class ShareSheetInjector(
                         return
                     }
 
-                    // best() already prefers a complete progressive MP4 when one exists. Offering
-                    // the row for an HLS-only capture would toast "no media" on tap — worse than
-                    // no row. Device 1.12 log had both master and progressive; progressive wins.
+                    // The row is only offered when something is actually downloadable, so a tap
+                    // can never toast "no media" -- that would be worse than no row. Since 1.19
+                    // that means a master playlist: `best()` returns only masters, because the
+                    // `.mp4` this gate used to demand was an init segment with no frames.
                     val hit = MediaSpy.best()
-                    if (hit == null || hit.kind != MediaSpy.Kind.PROGRESSIVE_MP4) {
+                    if (hit == null || hit.kind != MediaSpy.Kind.HLS_MASTER) {
                         DiagLog.line(
                             if (hit == null) ProbeMarkers.INJECT_NO_MEDIA
                             else "$MARK no downloadable capture (best=${hit.kind})",

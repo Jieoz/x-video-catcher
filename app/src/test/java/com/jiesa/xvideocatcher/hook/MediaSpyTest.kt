@@ -65,7 +65,7 @@ class MediaSpyTest {
     @Test
     fun classifiesProgressiveVideo() {
         val url = "https://video.twimg.com/amplify_video/1900000000000000000/vid/avc1/1280x720/abc.mp4"
-        assertEquals(MediaSpy.Kind.PROGRESSIVE_MP4, MediaSpy.classify(url))
+        assertEquals(MediaSpy.Kind.VIDEO_INIT, MediaSpy.classify(url))
     }
 
     @Test
@@ -167,18 +167,29 @@ class MediaSpyTest {
      * Flip RANK so master is last and this must fail.
      */
     @Test
-    fun prefersProgressiveOverMaster() {
+    fun prefersMasterOverInitSegment() {
         MediaSpy.clear()
-        val mp4 = "https://video.twimg.com/amplify_video/1/vid/avc1/640x360/a.mp4"
+        val init = "https://video.twimg.com/amplify_video/1/vid/avc1/0/0/640x360/a.mp4"
         val master = "https://video.twimg.com/amplify_video/1/pl/b.m3u8"
-        record(mp4)
+        record(init)
         record(master)
-        assertEquals(mp4, MediaSpy.best()?.url)
+        // Inverted in 1.19. This test asserted the opposite through 1.18 and is why the bug
+        // shipped green: the `.mp4` it preferred is an fMP4 header with no frames, so every save
+        // produced a few dozen unplayable KB. Only a master leads to a complete file.
+        assertEquals(master, MediaSpy.best()?.url)
+    }
+
+    /** An init segment alone is not downloadable: no master means no row, not a broken save. */
+    @Test
+    fun initSegmentAloneIsNotDownloadable() {
+        MediaSpy.clear()
+        record("https://video.twimg.com/amplify_video/1/vid/avc1/0/0/1080x1920/only.mp4")
+        assertNull(MediaSpy.best())
     }
 
     /**
      * fMP4 media segments share /vid/ with progressive files. Device 1.12 logged them as
-     * PROGRESSIVE_MP4 because isVideoTrack alone matched; they are not a playable download.
+     * VIDEO_INIT because isVideoTrack alone matched; they are not a playable download.
      *
      * Drop the `.mp4` extension check in classify and this must fail.
      */
@@ -188,15 +199,23 @@ class MediaSpyTest {
         assertNull(MediaSpy.classify(m4s))
     }
 
-    /** Among complete progressive files, higher resolution wins (player opens every rung's init). */
+    /**
+     * Recency beats resolution across tweets.
+     *
+     * The regression this pins: 1.18 ranked pixel area above recency, so a 1080x1920 video seen
+     * early won every later tap. The device log shows taps on three different tweets all saving
+     * one file from the first. Quality is no longer chosen here at all -- it comes from the
+     * selected master's own ladder in [Hls.bestVariant].
+     */
     @Test
-    fun prefersHigherResolutionProgressive() {
+    fun recentTweetBeatsAnEarlierLargerOne() {
         MediaSpy.clear()
-        val low = "https://video.twimg.com/amplify_video/1/vid/avc1/0/0/320x568/low.mp4"
-        val high = "https://video.twimg.com/amplify_video/1/vid/avc1/0/0/1080x1920/high.mp4"
-        record(low)
-        record(high)
-        assertEquals(high, MediaSpy.best()?.url)
+        record("https://video.twimg.com/amplify_video/1/vid/avc1/0/0/1080x1920/big.mp4")
+        record("https://video.twimg.com/amplify_video/1/pl/big.m3u8")
+        Thread.sleep(2)
+        record("https://video.twimg.com/amplify_video/2/vid/avc1/0/0/480x852/small.mp4")
+        record("https://video.twimg.com/amplify_video/2/pl/small.m3u8")
+        assertEquals("https://video.twimg.com/amplify_video/2/pl/small.m3u8", MediaSpy.best()?.url)
     }
 
     /** Within one kind, the video the user is watching now wins. */
@@ -209,6 +228,56 @@ class MediaSpyTest {
         Thread.sleep(2)
         record(newer)
         assertEquals(newer, MediaSpy.best()?.url)
+    }
+
+    /**
+     * Within one media group, the freshest master wins.
+     *
+     * X re-requests the same master with a changing `?tag=` (the device log shows
+     * `.../pl/gHnIGEflU4EasiGc.m3u8?tag=14` fetched repeatedly), so one video legitimately produces
+     * several capture entries. The oldest is the likeliest to have expired, and an expired master
+     * 403s with no retry that can help -- so the newest is the one to hand the downloader.
+     *
+     * This is the ablation partner for the recency comparator: flip `maxByOrNull` to `minByOrNull`
+     * in [MediaSpy.best] and only this test fails. Without it that comparator was untested, because
+     * every other case has a single master per group where min and max agree.
+     */
+    @Test
+    fun freshestMasterWinsWithinOneMediaGroup() {
+        MediaSpy.clear()
+        val stale = "https://video.twimg.com/amplify_video/7/pl/key.m3u8?tag=12"
+        val fresh = "https://video.twimg.com/amplify_video/7/pl/key.m3u8?tag=14"
+        record(stale)
+        Thread.sleep(2)
+        record(fresh)
+        assertEquals(fresh, MediaSpy.best()?.url)
+    }
+
+    /**
+     * The master must match the video being *watched*, not merely be the newest master seen.
+     *
+     * This is the shape the device log actually produced. Scrolling the timeline makes X prefetch
+     * masters for tweets that were never played: at 16:11:03-04 the capture contains masters for
+     * four different media ids while the segments still arriving belong to the one on screen. So
+     * "newest master" and "the video the user is looking at" are different answers, and only the
+     * second is correct.
+     *
+     * Ablation partner for the `newestId` grouping clause: replace it with null -- so any master
+     * can win -- and only this test fails. The cross-tweet test above cannot catch it, because
+     * there the newest capture and the newest master are the same video.
+     */
+    @Test
+    fun masterMustBelongToTheVideoBeingWatched() {
+        MediaSpy.clear()
+        val watched = "https://video.twimg.com/amplify_video/100/pl/watched.m3u8"
+        record(watched)
+        Thread.sleep(2)
+        // Prefetched while scrolling: newer master, different tweet, never played.
+        record("https://video.twimg.com/amplify_video/200/pl/prefetched.m3u8")
+        Thread.sleep(2)
+        // A segment of the watched video arrives last -- this is what identifies the group.
+        record("https://video.twimg.com/amplify_video/100/vid/avc1/0/0/720x1280/init.mp4")
+        assertEquals(watched, MediaSpy.best()?.url)
     }
 
     /** Photos are captured for diagnostics but must never be what the download row offers. */

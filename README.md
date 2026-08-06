@@ -8,16 +8,22 @@ Everything runs inside X's process. There is no activity, no service, no backgro
 no launcher icon — the APK exists only to be loaded into X by LSPosed. Installing it and opening
 it does nothing by design; the entry appears in X.
 
-> ### 1.18.0 replaces a visible row instead of appending a 13th
+> ### 1.19.0 downloads real video: HLS mux instead of an init segment
 >
-> 1.17 used a real free ResolveInfo (`com.android.bluetooth/… | 下载视频`) and logged
-> `INJECT row added … list size=13` four times with no crash and no button. Appending is the
-> wrong layer: the sheet only paints the host-built set.
+> 1.18 put the button on the sheet and saved a file for every tap — and every file was
+> corrupt and a few dozen KB. The URL it saved,
+> `/vid/avc1/0/0/<WxH>/<k>.mp4`, is the HLS **initialisation segment**: an fMP4 header with
+> zero frames. `MediaUrls`' own header documented that shape from the first capture; the
+> `PROGRESSIVE_MP4` class was a fiction, and X serves no progressive rendition at all.
 >
-> 1.18 **replaces index 0** with a same-identity clone (package/activity/icon unchanged, label
-> 「下载视频」). That identity already passed every host filter. Tap still by label; host launch
-> still swallowed. Side effect: the original first target (usually WhatsApp) is missing on that
-> open of the sheet.
+> 1.19 retires that class and downloads properly: master playlist → highest-area variant →
+> init + all `.m4s` segments concatenated → same again for the audio group → `MediaMuxer`
+> combines both tracks into one MP4. No re-encode, so quality is whatever the CDN served.
+>
+> Also fixed: `best()` ranked pixel area above recency, so every tap resolved to the largest
+> video of the whole session — the device log shows three taps on three tweets all saving one
+> file from the first. Recency now picks the media group; quality is chosen from that master's
+> own ladder.
 
 
 ## Target

@@ -73,8 +73,15 @@ internal object MediaSpy {
      */
     data class Seen(val url: String, val kind: Kind, val seenAt: Long)
 
-    /** Ranking classes, in preference order -- see [RANK]. */
-    enum class Kind { PROGRESSIVE_MP4, HLS_MASTER, HLS_VARIANT, PHOTO }
+    /**
+     * Ranking classes, in preference order -- see [RANK].
+     *
+     * [VIDEO_INIT] was called `PROGRESSIVE_MP4` through 1.18 and that name was the bug: the URL it
+     * matches (`/vid/avc1/0/0/<WxH>/<k>.mp4`) is an fMP4 initialisation segment, not a complete
+     * file. It is kept as a class only so the log still shows it being seen; it is never
+     * downloadable. See [Hls] for the measurement.
+     */
+    enum class Kind { VIDEO_INIT, HLS_MASTER, HLS_VARIANT, PHOTO }
 
     fun install(classLoader: ClassLoader) {
         val spec = resolveDataSpec(classLoader)
@@ -169,44 +176,41 @@ internal object MediaSpy {
             MediaUrls.isMasterPlaylist(url) -> Kind.HLS_MASTER
             MediaUrls.isManifest(url) -> Kind.HLS_VARIANT
             MediaUrls.isPhoto(url) -> Kind.PHOTO
-            // Complete progressive file only. Device 1.12 logs also show fMP4 media segments
-            // (path like /vid/.../0/3000/....m4s) under /vid/; those are pieces of an HLS stream, not a file
-            // the user can play. isVideoTrack accepts them, so the extension is the load-bearing
-            // discriminator between "save this" and "log and ignore".
+            // The init segment. 1.13-1.18 treated this as a complete file because it ends in
+            // `.mp4`; it is an fMP4 header with no frames, and saving it produced the small
+            // unplayable files the device reported. Classified so it appears in the log, never
+            // offered for download -- see [best].
             MediaUrls.isVideoTrack(url) && url.substringBefore('?').endsWith(".mp4", ignoreCase = true) ->
-                Kind.PROGRESSIVE_MP4
+                Kind.VIDEO_INIT
             else -> null
         }
     }
 
     /**
-     * The best video URL currently known, or null if the player has not fetched one.
+     * The URL to download, or null when the player has not fetched a usable one.
      *
-     * Photos are excluded: they are captured for diagnostics, but the tweet-based path already
-     * handles images and picking one here would race it.
+     * Only a **master playlist** qualifies. Through 1.18 this preferred `PROGRESSIVE_MP4` because
+     * `HostDownloader` could write it directly -- but what it wrote was an init segment, so the
+     * "directly downloadable" advantage was writing a broken file quickly. Masters are the only
+     * URLs from which a complete video is reachable.
      *
-     * A complete progressive MP4 outranks playlists: [HostDownloader.downloadCaptured] can save it
-     * today, and the 1.12 device log proved X serves both on the same playback
-     * (`HLS_MASTER` plus a complete progressive .mp4 under /vid/). Preferring the master left the download path with a
-     * non-fetchable URL while a playable file was already in the capture set.
+     * Selection is **most recent first**, and that ordering is the second fix here. 1.18 ranked by
+     * pixel area before recency, so the largest video of the whole session won every tap: the
+     * device log shows taps on three different tweets all resolving to one 1080x1920 file from the
+     * first. Quality is chosen later, from the master's own ladder ([Hls.bestVariant]), which is
+     * where it belongs -- the ladder lists what the CDN has, while the capture set only lists what
+     * the player happened to request.
      *
-     * Within progressive files, higher resolution wins, then recency — the player often opens the
-     * init segment of every rung; the user wants the sharpest complete file seen so far.
+     * The newest capture identifies the media group; the master for *that* group is preferred, with
+     * any master as a fallback so a tap still works if the group's master scrolled out of the cap.
      */
     fun best(): Seen? = synchronized(seen) {
-        seen.filter { it.kind != Kind.PHOTO }
-            .maxWithOrNull(
-                compareBy<Seen> { RANK.indexOf(it.kind) }
-                    .thenBy { progressiveRank(it) }
-                    .thenBy { it.seenAt },
-            )
-    }
-
-    /** Pixel area for progressive URLs; 0 for everything else so it does not disturb other kinds. */
-    private fun progressiveRank(seen: Seen): Long {
-        if (seen.kind != Kind.PROGRESSIVE_MP4) return 0L
-        val (w, h) = MediaUrls.resolution(seen.url) ?: return 0L
-        return w.toLong() * h.toLong()
+        val videos = seen.filter { it.kind != Kind.PHOTO }
+        if (videos.isEmpty()) return null
+        val newestId = videos.maxByOrNull { it.seenAt }?.let { MediaUrls.mediaId(it.url) }
+        val masters = videos.filter { it.kind == Kind.HLS_MASTER }
+        return masters.filter { MediaUrls.mediaId(it.url) == newestId }.maxByOrNull { it.seenAt }
+            ?: masters.maxByOrNull { it.seenAt }
     }
 
     /** Everything captured, newest first. Diagnostics only. */
@@ -224,14 +228,7 @@ internal object MediaSpy {
     private const val CAP = 32
     private const val URL_LOG_LIMIT = 160
 
-    /**
-     * Preference order, best last -- [best] takes the maximum.
-     *
-     * `indexOf` returns -1 for a kind absent here, which sorts below everything present. That is
-     * the intended fallback rather than a crash if a new kind is added and not ranked.
-     */
-    // Best last: progressive is what downloadCaptured can write; master/variant are diagnostics.
-    private val RANK = listOf(Kind.HLS_VARIANT, Kind.HLS_MASTER, Kind.PROGRESSIVE_MP4)
+
 
     /**
      * `DataSpec`'s field types in declaration order, as `Class.getName()` spells them.
