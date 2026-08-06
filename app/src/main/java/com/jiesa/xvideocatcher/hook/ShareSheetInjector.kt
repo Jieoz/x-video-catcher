@@ -167,17 +167,17 @@ internal class ShareSheetInjector(
                     }
 
                     val wanted = strings.downloadLabel(context)
-                    val row = HostRow.cloneWithLabel(template, ROW_ID, wanted)
+                    // 1.14–1.16: inventing package/activity (or reusing WhatsApp's pair) either
+                    // dropped the row or crashed Compose. Live path takes a free ResolveInfo.
+                    val row = HostRow.cloneForSheet(template, wanted, rows, context)
                     if (row == null) {
-                        // 1.13 failed here on the live final data-class row. Naming the template
-                        // class alone was not enough to see why; field finality is the tell.
                         val finals = template.javaClass.declaredFields.count {
                             !java.lang.reflect.Modifier.isStatic(it.modifiers) &&
                                 java.lang.reflect.Modifier.isFinal(it.modifiers)
                         }
                         DiagLog.line(
                             "$MARK row clone failed from ${template.javaClass.name} " +
-                                "(finalFields=$finals label=$wanted)",
+                                "(finalFields=$finals label=$wanted occupied=${rows.size})",
                         )
                         return
                     }
@@ -188,17 +188,19 @@ internal class ShareSheetInjector(
                     // without scrolling, and is the first place the user looks.
                     list.add(0, row)
                     val shown = runCatching {
-                        // Mirror SharePathProbe.describeRow without depending on its private helper.
                         val label = HostRow.labelOf(row)
-                        val pkg = row.javaClass.declaredFields
+                        val dotted = row.javaClass.declaredFields
                             .asSequence()
                             .filter { it.type == String::class.java }
                             .mapNotNull { f ->
                                 f.isAccessible = true
                                 f.get(row) as? String
                             }
-                            .firstOrNull { it.contains('.') && !it.contains(' ') }
-                        "$pkg | $label"
+                            .filter { it.contains('.') && !it.contains(' ') }
+                            .toList()
+                        val pkg = dotted.getOrNull(0)
+                        val act = dotted.getOrNull(1)?.substringAfterLast('.') ?: dotted.getOrNull(1)
+                        "$pkg/$act | $label"
                     }.getOrElse { "?" }
                     DiagLog.line(
                         "${ProbeMarkers.INJECT_ROW_ADDED} (${hit.kind}, list size=${list.size}, $shown)",

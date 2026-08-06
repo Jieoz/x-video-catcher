@@ -8,16 +8,15 @@ Everything runs inside X's process. There is no activity, no service, no backgro
 no launcher icon — the APK exists only to be loaded into X by LSPosed. Installing it and opening
 it does nothing by design; the entry appears in X.
 
-> ### 1.16.0 gives the download row a unique activity key
+> ### 1.17.0 steals a free installed share target's identity
 >
-> 1.15 kept WhatsApp's package **and** activity, only changing the label. Device log:
-> `INJECT row added (…, com.whatsapp | 下载视频)` then immediate process restart
-> (`=== module attached ===` again). The Compose share strip keys targets by
-> `(package, activity)` — a second WhatsApp entry is a duplicate key crash.
+> 1.16 inserted without crashing (`INJECT row added … com.whatsapp | 下载视频` ×3, no process
+> restart) but still no visible button: inventing `…Download` as the activity is not a resolvable
+> component, so a later filter drops it the same way 1.14 dropped the module package.
 >
-> 1.16 still keeps an **installed** package (so the row is not filtered like 1.14's module id),
-> but rewrites activity to `com.jiesa.xvideocatcher.Download`. Tap is still by label and still
-> swallows the host launch.
+> 1.17 queries `PackageManager` for `ACTION_SEND` targets, picks the first `(package, activity)`
+> **not already on the sheet**, and copies that identity (plus its icon) onto the cloned row.
+> Label stays 「下载视频」; tap is still claimed by label and the host launch is still swallowed.
 
 
 ## Target

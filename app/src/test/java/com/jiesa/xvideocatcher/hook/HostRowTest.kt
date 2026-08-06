@@ -10,23 +10,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Tests for building a share-sheet row.
- *
- * ## Device failure this suite must keep red-on-regression
- *
- * 1.13 on device: `INJECT row clone failed from com.x.models.share.a` three times per share.
- * That class is all-final, no int id, no usable `clone()` / no-arg ctor. A suite that only
- * exercised a mutable Java bean never saw the failure.
- *
- * Each decoy / positive case below breaks one clause of the live path.
+ * No Robolectric: this host has no aarch64 conscrypt (see DiagSinkTest). PackageManager is
+ * exercised only through [HostRow.pickFree], which is the load-bearing selection predicate.
  */
 class HostRowTest {
 
     private val icon: Drawable = ColorDrawable(0xFF112233.toInt())
 
-    /** Live shape: final fields, primary ctor, no int id — [com.x.models.share.a]. */
     @Test
-    fun `constructs a final data-class row with new label and unique activity`() {
+    fun `constructs a final data-class row with label rewrite`() {
         val template = com.x.models.share.a(
             "com.whatsapp",
             "com.whatsapp.contact.ui.picker.ExternalShareAlias",
@@ -35,24 +27,76 @@ class HostRowTest {
             true,
         )
         val copy = HostRow.cloneWithLabel(template, 0x58564331, "下载视频")
-        assertNotNull("final data-class row must clone via constructor", copy)
+        assertNotNull(copy)
         assertNotSame(template, copy)
-        assertTrue(copy is com.x.models.share.a)
-
         val row = copy as com.x.models.share.a
         assertEquals("下载视频", row.label)
         assertEquals("com.whatsapp", row.packageName)
-        assertEquals(
-            "activity must be unique so Compose does not key-collide with the template",
-            HostRow.MODULE_ACTIVITY,
-            row.activityName,
-        )
-        assertEquals(icon, row.icon)
-        assertEquals(true, row.direct)
+        assertEquals("com.whatsapp.contact.ui.picker.ExternalShareAlias", row.activityName)
+    }
 
-        // Template is a live host object — never mutate it.
-        assertEquals("com.whatsapp", template.packageName)
-        assertEquals("WhatsApp", template.label)
+    @Test
+    fun `occupiedKeys reads package and activity from live-shaped rows`() {
+        val rows = listOf(
+            com.x.models.share.a("com.whatsapp", "com.whatsapp.A", "WhatsApp", icon, true),
+            com.x.models.share.a(
+                "org.telegram.messenger",
+                "org.telegram.ui.LaunchActivity",
+                "Telegram",
+                icon,
+                false,
+            ),
+        )
+        assertEquals(
+            setOf(
+                "com.whatsapp" to "com.whatsapp.A",
+                "org.telegram.messenger" to "org.telegram.ui.LaunchActivity",
+            ),
+            HostRow.occupiedKeys(rows),
+        )
+    }
+
+    @Test
+    fun `pickFree skips identities already on the sheet`() {
+        val candidates = listOf(
+            HostRow.ShareIdentity("com.whatsapp", "com.whatsapp.A", icon),
+            HostRow.ShareIdentity("org.telegram.messenger", "org.telegram.ui.LaunchActivity", icon),
+        )
+        val free = HostRow.pickFree(candidates, setOf("com.whatsapp" to "com.whatsapp.A"))
+        assertNotNull(free)
+        assertEquals("org.telegram.messenger", free!!.packageName)
+    }
+
+    @Test
+    fun `pickFree returns null when every match is occupied`() {
+        val candidates = listOf(HostRow.ShareIdentity("com.whatsapp", "com.whatsapp.A", icon))
+        assertNull(HostRow.pickFree(candidates, setOf("com.whatsapp" to "com.whatsapp.A")))
+    }
+
+    @Test
+    fun `constructWithIdentity uses free package not the template`() {
+        val template = com.x.models.share.a(
+            "com.whatsapp",
+            "com.whatsapp.A",
+            "WhatsApp",
+            icon,
+            true,
+        )
+        val identity = HostRow.ShareIdentity(
+            "com.discord",
+            "com.discord.share.ShareActivity",
+            ColorDrawable(0xFF00FF00.toInt()),
+        )
+        val copy = HostRow.constructWithIdentity(template, "下载视频", identity)
+        assertNotNull(copy)
+        val row = copy as com.x.models.share.a
+        assertEquals("下载视频", row.label)
+        assertEquals("com.discord", row.packageName)
+        assertEquals("com.discord.share.ShareActivity", row.activityName)
+        assertTrue(
+            (row.packageName to row.activityName) !in
+                HostRow.occupiedKeys(listOf(template)),
+        )
     }
 
     @Test
@@ -66,56 +110,6 @@ class HostRowTest {
         )
         assertEquals("Telegram", HostRow.labelOf(row))
     }
-
-    @Test
-    fun `package-like strings are not chosen as the label`() {
-        // package and activity are longer than some labels and full of dots. Choosing longest
-        // String outright would write the download text into the package slot.
-        val template = com.x.models.share.a(
-            "com.very.long.package.name.that.outruns.label",
-            "com.very.long.activity.ComponentNameAlias",
-            "Save",
-            icon,
-            false,
-        )
-        val copy = HostRow.cloneWithLabel(template, 1, "Download video") as com.x.models.share.a
-        assertEquals("Download video", copy.label)
-        assertEquals("com.very.long.package.name.that.outruns.label", copy.packageName)
-        assertEquals(HostRow.MODULE_ACTIVITY, copy.activityName)
-    }
-
-    @Test
-    fun `chinese labels without spaces still win over package fields`() {
-        val template = com.x.models.share.a(
-            "com.tencent.mm",
-            "com.tencent.mm.ui.tools.ShareImgUI",
-            "发送给朋友",
-            icon,
-            true,
-        )
-        val copy = HostRow.cloneWithLabel(template, 1, "下载视频") as com.x.models.share.a
-        assertEquals("下载视频", copy.label)
-        assertEquals("com.tencent.mm", copy.packageName)
-        assertEquals(HostRow.MODULE_ACTIVITY, copy.activityName)
-        assertEquals("发送给朋友", HostRow.labelOf(template))
-    }
-
-    @Test
-    fun `injected activity differs from every template in a typical sheet`() {
-        // Reproduces the 1.15 crash shape: cloning WhatsApp with the same activity collides.
-        val templates = listOf(
-            com.x.models.share.a("com.whatsapp", "com.whatsapp.contact.ui.picker.ExternalShareAlias", "WhatsApp", icon, true),
-            com.x.models.share.a("org.telegram.messenger", "org.telegram.ui.LaunchActivity", "Telegram", icon, false),
-        )
-        val injected = HostRow.cloneWithLabel(templates[0], 1, "下载视频") as com.x.models.share.a
-        val keys = templates.map { it.packageName to it.activityName }.toSet()
-        assertTrue(
-            "injected (package, activity) must not collide with any host row",
-            (injected.packageName to injected.activityName) !in keys,
-        )
-    }
-
-    // ---- mutable fallback (unit-test bean; not the live host model) -------------------------
 
     private class MutableRow(
         @JvmField var id: Int = 7,

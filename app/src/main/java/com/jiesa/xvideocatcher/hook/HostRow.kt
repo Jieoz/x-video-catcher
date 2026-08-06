@@ -1,5 +1,11 @@
 package com.jiesa.xvideocatcher.hook
 
+import android.content.Context
+import com.jiesa.xvideocatcher.DiagLog
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
+import android.graphics.drawable.Drawable
 import java.lang.reflect.Constructor
 import java.lang.reflect.Field
 import java.lang.reflect.Modifier
@@ -7,107 +13,207 @@ import java.lang.reflect.Modifier
 /**
  * Builds a share-sheet row by copying one the host already made.
  *
- * ## Why not invent a constructor call from scratch
+ * ## Device history that shapes this file
  *
- * The live row model on 12.13.0-release.0 is `com.x.models.share.a`: three `String`s (package,
- * activity, label), a `Drawable`, and a `boolean`. Field *order* is an R8 artefact; guessing it
- * produces a blank row rather than an error. Copying a real row keeps every field the host expects,
- * including the icon the sheet already rendered.
+ * | Ver | Strategy | Device result |
+ * |---|---|---|
+ * | 1.13 | clone needed int id / non-final fields | `row clone failed` |
+ * | 1.14 | package = module id | `row added` but never shown |
+ * | 1.15 | full WhatsApp clone, label only | `row added` then process crash |
+ * | 1.16 | installed package + fake activity | `row added`, no crash, still no button |
  *
- * ## Why the 1.13 clone path failed on device
+ * 1.16 proved the remaining filter: the sheet (or a step after the provider) requires a
+ * **real, resolvable** `(package, activity)` — inventing `…Download` is dropped the same way as
+ * inventing a package. Compose also keys on that pair, so it must be unique in the list.
  *
- * `INJECT row clone failed from com.x.models.share.a` (three times in the 1.13 log). That class is a
- * Kotlin data class: **every field is `final`**, there is **no `int` id**, and `Object.clone` is not
- * exposed. The previous implementation required a writable int id and either `clone()` or a no-arg
- * constructor plus non-final field writes — all three absences are permanent on this model, so the
- * download row was never appended even after dispatch resolution was fixed.
+ * ## Live strategy (1.17)
  *
- * ## How a final data-class row is copied
+ * Keep the data-class constructor copy, but take **package, activity, and icon** from a
+ * [ResolveInfo] that:
  *
- * Reflect the single all-args constructor whose parameter types match the instance fields, feed it
- * the template's values, and override:
+ * 1. is returned by [PackageManager] for a normal `ACTION_SEND` query (so it is installed and
+ *    exported), and
+ * 2. is **not** already present in the sheet's current row list (so the Compose key is unique and
+ *    we do not crash like 1.15).
  *
- *  - the user-visible label (longest non-scribe String);
- *  - the **activity** String, rewritten to [MODULE_ACTIVITY] so the row's identity is unique.
- *
- * Package and icon stay as on the template. 1.14 rewrote the package to the module id and the row
- * was dropped (not installed). 1.15 kept package **and** activity from WhatsApp and the sheet
- * crashed on open: Compose keys share targets by package+activity, and a second WhatsApp entry
- * is a duplicate key. Keeping an installed package while changing only the activity satisfies both
- * constraints. Tap claiming is still by [labelOf]; [ShareSheetInjector] swallows the host launch.
+ * The visible label is still ours. Tap claiming is still by [labelOf]; [ShareSheetInjector]
+ * swallows the host launch so that app is never actually opened.
  */
 internal object HostRow {
 
-    /**
-     * Legacy constant from 1.14's package rewrite. Kept so older tests/docs that name it still
-     * compile; the live path no longer writes this into the row (it is not an installed share
-     * target and the sheet drops it).
-     */
+    /** Legacy 1.14 constant; not written into live rows. */
     const val MODULE_PACKAGE = "com.jiesa.xvideocatcher"
 
-    /**
-     * Activity component written into the cloned row.
-     *
-     * Must be unique among the other rows' (package, activity) pairs — that pair is what the
-     * Compose sheet keys on. Reusing the template's activity (1.15) produced two WhatsApp entries
-     * and crashed the host on share open. This string is never launched: the tap hook claims the
-     * row by label and sets `param.result = null` before the host starts an activity.
-     */
+    /** Legacy 1.16 constant; not written into live rows (unresolvable activity). */
     const val MODULE_ACTIVITY = "com.jiesa.xvideocatcher.Download"
 
     /**
-     * A copy of [template] labelled [label], or null if it cannot be built.
+     * Build a row for the live Compose sheet.
      *
-     * [id] is retained for call-site compatibility with older sheet models that carried an int
-     * primary key; the live Compose row has none, and [id] is ignored on that path.
+     * @param existingRows the provider's list **before** insertion — used to pick a free identity
+     * @param context host context for [PackageManager]
      */
-    fun cloneWithLabel(template: Any, id: Int, label: String): Any? {
-        // Live path first: final data-class rows are what the device actually builds.
-        constructCopy(template, label)?.let { return it }
-
-        // Fallback for fixtures / any non-final host model still reachable in tests.
-        return mutableCopy(template, id, label)
+    fun cloneForSheet(
+        template: Any,
+        label: String,
+        existingRows: List<*>,
+        context: Context,
+    ): Any? {
+        val occupied = occupiedKeys(existingRows)
+        val identity = freeShareTarget(context.packageManager, occupied)
+            ?: run {
+                DiagLog.line("INJECT no free ResolveInfo (occupied=${occupied.size})")
+                return null
+            }
+        return constructCopy(
+            template = template,
+            label = label,
+            packageName = identity.packageName,
+            activityName = identity.activityName,
+            icon = identity.icon,
+        )
     }
 
     /**
-     * The user-visible label on a row-like object, or null when it has none.
+     * Test / fallback entry: label-only rewrite on a mutable bean, or full construct with the
+     * template's own package/activity when no PM identity is supplied.
      *
-     * Public because tap identification needs it: the live share action carries the row, and the
-     * only reliable way to recognise the injected row is that its label is the string this module
-     * wrote.
+     * Prefer [cloneForSheet] on the device path.
      */
+    fun cloneWithLabel(template: Any, id: Int, label: String): Any? {
+        constructCopy(
+            template = template,
+            label = label,
+            packageName = null,
+            activityName = null,
+            icon = null,
+        )?.let { return it }
+        return mutableCopy(template, id, label)
+    }
+
     fun labelOf(row: Any): String? {
         val fields = instanceFields(row.javaClass)
         val f = labelFieldOf(row, fields) ?: return null
         return runCatching { f.get(row) as? String }.getOrNull()
     }
 
+    /** package → activity pairs already on the sheet. */
+    internal fun occupiedKeys(rows: List<*>): Set<Pair<String, String>> {
+        val out = mutableSetOf<Pair<String, String>>()
+        for (row in rows) {
+            if (row == null) continue
+            val fields = instanceFields(row.javaClass)
+            val labelField = labelFieldOf(row, fields)
+            val dotted = dottedStringFields(row, fields, labelField)
+            if (dotted.size >= 2) {
+                val pkg = runCatching { dotted[0].get(row) as? String }.getOrNull() ?: continue
+                val act = runCatching { dotted[1].get(row) as? String }.getOrNull() ?: continue
+                out += pkg to act
+            }
+        }
+        return out
+    }
+
     /**
-     * Allocates via the data-class constructor. Returns null when the type is not an all-final
-     * value with a matching ctor — caller falls through to [mutableCopy].
+     * First [ResolveInfo] for a share intent whose component is not in [occupied].
+     *
+     * Queries text/plain and video star MIME types — X shares status URLs as text, and some targets only
+     * appear on one MIME. Order is PackageManager's default ranking; we only care about freeness.
      */
-    private fun constructCopy(template: Any, label: String): Any? {
+    internal fun freeShareTarget(
+        pm: PackageManager,
+        occupied: Set<Pair<String, String>>,
+    ): ShareIdentity? {
+        val candidates = mutableListOf<ShareIdentity>()
+        val seen = mutableSetOf<Pair<String, String>>()
+        for (mime in SHARE_MIMES) {
+            val intent = Intent(Intent.ACTION_SEND).setType(mime)
+            val matches = runCatching {
+                @Suppress("DEPRECATION")
+                pm.queryIntentActivities(intent, 0)
+            }.getOrElse { emptyList() }
+            for (ri in matches) {
+                val pkg = ri.activityInfo?.packageName ?: continue
+                val act = ri.activityInfo?.name ?: continue
+                val key = pkg to act
+                if (key in seen) continue
+                seen += key
+                val icon = runCatching { ri.loadIcon(pm) }.getOrNull()
+                    ?: runCatching { pm.getApplicationIcon(pkg) }.getOrNull()
+                    ?: continue
+                candidates += ShareIdentity(pkg, act, icon)
+            }
+        }
+        return pickFree(candidates, occupied)
+    }
+
+    data class ShareIdentity(
+        val packageName: String,
+        val activityName: String,
+        val icon: Drawable,
+    )
+
+    /** First candidate whose (package, activity) is not in [occupied]. */
+    internal fun pickFree(
+        candidates: List<ShareIdentity>,
+        occupied: Set<Pair<String, String>>,
+    ): ShareIdentity? {
+        val seen = mutableSetOf<Pair<String, String>>()
+        for (c in candidates) {
+            val key = c.packageName to c.activityName
+            if (key in occupied || key in seen) continue
+            seen += key
+            return c
+        }
+        return null
+    }
+
+    /** Test/device helper: build a row with an explicit free identity. */
+    internal fun constructWithIdentity(
+        template: Any,
+        label: String,
+        identity: ShareIdentity,
+    ): Any? = constructCopy(
+        template = template,
+        label = label,
+        packageName = identity.packageName,
+        activityName = identity.activityName,
+        icon = identity.icon,
+    )
+
+    /**
+     * @param packageName when non-null, written into the package field (live path)
+     * @param activityName when non-null, written into the activity field (live path)
+     * @param icon when non-null, written into the Drawable field (live path)
+     */
+    private fun constructCopy(
+        template: Any,
+        label: String,
+        packageName: String?,
+        activityName: String?,
+        icon: Drawable?,
+    ): Any? {
         val cls = template.javaClass
         val fields = instanceFields(cls)
         if (fields.isEmpty()) return null
         if (fields.any { !Modifier.isFinal(it.modifiers) }) return null
 
         val labelField = labelFieldOf(template, fields) ?: return null
-        // Package stays on the template (must be an installed app — 1.14's MODULE_PACKAGE was
-        // dropped). Activity is rewritten to MODULE_ACTIVITY so (package, activity) is unique —
-        // 1.15 kept both and crashed Compose with a duplicate WhatsApp key.
+        val packageField = packageFieldOf(template, fields, labelField)
         val activityField = activityFieldOf(template, fields, labelField)
+        val iconField = fields.firstOrNull { it.type.name == DRAWABLE || Drawable::class.java.isAssignableFrom(it.type) }
 
         val ctor = matchingConstructor(cls, fields) ?: return null
         val args = Array(fields.size) { i ->
             val f = fields[i]
             when {
                 f == labelField -> label
-                activityField != null && f == activityField -> MODULE_ACTIVITY
+                packageName != null && f == packageField -> packageName
+                activityName != null && f == activityField -> activityName
+                icon != null && f == iconField -> icon
                 else -> runCatching { f.get(template) }.getOrNull()
             }
         }
-        // Constructor parameters must all be present; a null for a primitive boolean would NPE.
         for (i in args.indices) {
             val need = ctor.parameterTypes[i]
             if (args[i] == null && need.isPrimitive) return null
@@ -118,12 +224,6 @@ internal object HostRow {
         }.getOrNull()
     }
 
-    /**
-     * Constructor whose parameter types equal the instance-field types **in declaration order**.
-     *
-     * Data-class primary constructors are generated that way. Searching by multiset alone would
-     * accept a synthetic reordering that puts the label into the package slot.
-     */
     private fun matchingConstructor(cls: Class<*>, fields: List<Field>): Constructor<*>? {
         val wanted = fields.map { it.type }
         return cls.declaredConstructors.firstOrNull { c ->
@@ -131,36 +231,17 @@ internal object HostRow {
         }
     }
 
-    /**
-     * Field holding the launch package, if any: a dotted String that is not the label.
-     *
-     * Package names always contain `.` and never a space; labels on this sheet are short display
-     * names (`WhatsApp`, `Telegram`, `发送给朋友`) without dots. That is enough to separate them
-     * without depending on the obfuscated field name.
-     */
-    private fun packageFieldOf(template: Any, fields: List<Field>, labelField: Field): Field? =
-        dottedStringFields(template, fields, labelField).firstOrNull()
+    private fun packageFieldOf(template: Any, fields: List<Field>, labelField: Field?): Field? =
+        dottedStringFields(template, fields, labelField).getOrNull(0)
 
-    /**
-     * The activity component field: the second dotted String after [labelField], or the only one
-     * that is not the package when package was identified first.
-     *
-     * On the live model the three Strings are package, activity, label in field order. Label is
-     * already excluded; of the two remaining dotted Strings, package is first and activity second.
-     */
-    private fun activityFieldOf(template: Any, fields: List<Field>, labelField: Field): Field? {
-        val dotted = dottedStringFields(template, fields, labelField)
-        return when {
-            dotted.size >= 2 -> dotted[1]
-            dotted.size == 1 -> dotted[0] // degenerate fixture; still rewrite so the key changes
-            else -> null
-        }
-    }
+    private fun activityFieldOf(template: Any, fields: List<Field>, labelField: Field?): Field? =
+        dottedStringFields(template, fields, labelField).getOrNull(1)
+            ?: dottedStringFields(template, fields, labelField).getOrNull(0)
 
     private fun dottedStringFields(
         template: Any,
         fields: List<Field>,
-        labelField: Field,
+        labelField: Field?,
     ): List<Field> =
         fields.filter { it.type == String::class.java && it != labelField }
             .filter { f ->
@@ -185,9 +266,6 @@ internal object HostRow {
 
         val labelField = labelFieldOf(template, fields) ?: return null
         runCatching { labelField.set(copy, label) }.onFailure { return null }
-
-        // Do NOT rewrite dotted Strings here. On the old actionsheet bean they are scribe keys.
-        // Activity rewriting for uniqueness belongs only on the final data-class path.
         return copy
     }
 
@@ -200,7 +278,6 @@ internal object HostRow {
             .maxByOrNull { it.second.length }
             ?.first
 
-    /** Analytics identifiers: dotted or underscored tokens with no whitespace. */
     private fun looksLikeScribeKey(v: String): Boolean =
         !v.contains(' ') && (v.contains('.') || v.contains('_'))
 
@@ -232,4 +309,7 @@ internal object HostRow {
         out.forEach { it.isAccessible = true }
         return out
     }
+
+    private val SHARE_MIMES = listOf("text/plain", "video/*", "*/*")
+    private const val DRAWABLE = "android.graphics.drawable.Drawable"
 }
