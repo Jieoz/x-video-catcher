@@ -83,8 +83,8 @@ internal object ProbeMarkers {
     // mechanism rather than a parallel one, so check_markers.py gates them identically -- an
     // injector line the README cannot explain is the same defect as a probe line it cannot explain.
 
-    /** Anchor resolution for the injector: controller and show-method, or MISS. */
-    const val INJECT_RESOLVE = "INJECT controller="
+    /** Anchor resolution summary for the injector: state, constructor, row, and dispatch count. */
+    const val INJECT_RESOLVE = "INJECT resolve "
 
     /** The download row was appended to the sheet's row list. */
     const val INJECT_ROW_ADDED = "INJECT row added"

@@ -311,7 +311,7 @@ The log answers the questions worth asking, in order:
 | `INJECT resolve state=… ctor=… row=… dispatch=…` | Row/action/dispatch/state resolved and constructor/tap hooks were armed |
 | `INJECT row added (APPEND …)` | **The line that means it worked.** A separate download row was inserted into the state constructor input; no host row was replaced |
 | `INJECT tap claimed` | A tap on the injected row reached the module and download resolution started |
-| `MEDIASPY HLS_MASTER` / `HLS_VARIANT` / `VIDEO_INIT` | The host player URL capture path is armed and observing that media group |
+| `INJECT sheet opened, no downloadable media` | The sheet opened but neither frozen state nor MediaSpy had a dow...[truncated]
 | `INJECT row-class MISS -- cannot build a row` | The host row shape is newer than the resolver; action/state/dispatch MISS lines after it are cascading, not separate faults |
 | `INJECT hook FAILED <name>: …` | That injector hook could not be installed; the failure is caught so X keeps running |
 | `ERROR probe` … failed: … | A probe hook threw. It is caught, because a throw inside a host callback surfaces as X crashing |
