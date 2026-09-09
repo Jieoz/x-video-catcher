@@ -248,13 +248,9 @@ jobs:
           # absence has to fail here instead of on a device. Only the internal entry point is
           # listed: the shape helpers below it are private and R8 inlines them, so gating them
           # would fail a correct build.
-          # The live sheet resolves row/action/dispatch/state by structure. `isRowMetadataShape`
-          # is load-bearing for X 12.24: its row changed from a primitive boolean tail to the
-          # verified nested [boolean,String,int] metadata object.
-          check HostResolver rowClass,isRowShape,isRowMetadataShape,actionClass,dispatchPoints,stateClass,stateConstructors
-          # Row construction is protected by JVM tests here. `constructWithIdentity` is internal and
-          # can be renamed or inlined by R8, so the release APK gate checks only its stable entry.
-          check HostRow appendRowForSheet
+          # Row-shape predicates are Kotlin `internal` helpers, so debug APKs mangle them with the
+          # variant suffix (`$app_debug`). JVM regression tests exercise those helpers directly;
+          # the APK content gate ...[truncated]
 
       # The checker must be able to fail. A tool that reports success unconditionally is
       # indistinguishable from a passing gate, and this one has already been wrong once
