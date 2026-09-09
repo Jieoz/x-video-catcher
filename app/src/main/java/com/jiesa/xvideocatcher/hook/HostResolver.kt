@@ -23,31 +23,41 @@ import java.lang.reflect.Modifier
  * Keeping the old constants as a fallback would only preserve a path proven unreachable, so they
  * are gone.
  *
+ * ## Why the row *provider* is gone too (1.49)
+ *
+ * 1.43–1.48 all resolved the row list through a provider method: `(String) -> ArrayList` on the
+ * class owning a `PackageManager`, later relaxed to two more tiers. Every tier required the return
+ * type to be a `List`. On 12.20.5 that method does not exist in any form, and no relaxation could
+ * have found it: the row-building logic moved into a coroutine, so the compiler emitted an anonymous
+ * `SuspendLambda` whose entire signature is `invokeSuspend(Object) -> Object`. **Coroutine lowering
+ * erases exactly the property all three tiers were anchored on**, which is why the device reported
+ * `0 strict / 0 loose / 0 any-arg candidates` — not a bad predicate, an unmatchable one.
+ *
+ * So the module no longer looks for the code that builds the rows. It looks for the *state object*
+ * they end up in, which is a data class and cannot be erased into a lambda.
+ *
  * ## What the live sheet looks like
  *
- * `chooser.j.J0` attaches a `ComposeView` to the Activity's decor view and calls `setContent`. It is
- * Compose: there is no view hierarchy to insert a row into, and no adapter list holding item views.
- * So the module targets the **data** the sheet renders from:
- *
- *  - [rowClass] — the row model: 3 `String`s, a `Drawable`, a `boolean`.
- *  - [rowProvider] — `(String) -> ArrayList` on the class that owns a `Context` and can hand out a
- *    `PackageManager`; this is what enumerates shareable apps, and its return value is the row list.
+ *  - [rowClass] — the row model: 3 `String`s, one non-String reference (the icon), a `boolean`.
  *  - [actionClass] / [dispatchPoints] — the sealed action carrying a chosen row, and every method
- *    that receives one. Three classes declare it (interface plus two implementations) and all are
- *    hooked, for the same reason 1.4.0 needed both `n0` declarations: an override that does not call
- *    `super` is its own entry point.
- *  - [sheetOpen] — `chooser.j.J0`, hooked only to record that the sheet opened at all. Without an
- *    unconditional "panel opened" record, "the hook never fired" and "the log never landed" are the
- *    same symptom, which is what made the last three diagnoses ambiguous.
+ *    that receives one. Both were proven live on the device (`dispatch=2 point(s)`, and the hooks
+ *    fire on tap).
+ *  - [stateClass] — the sheet state, **derived from** [dispatchPoints]: the class declaring a
+ *    dispatch method also declares the sheet's state transform, `(S) -> S`. `S` is the state.
+ *    Nothing here is searched for independently, so this is not a new guess; it is a consequence of
+ *    an anchor the device already confirmed.
  *
  * ## Anchoring rules
  *
- * No obfuscated name is trusted, and no class name is hard-coded except
- * `com.twitter.app.common.dialog.BaseDialogFragment`, which the host instantiates by name so R8 must
- * keep it. Everything else is found by enumerating short obfuscated names within a recorded package
- * (`a`..`z`, `a0`..`z9`, plus nested `x$y`) and accepting only on shape. R8 renames a class within
- * its package rather than moving it out, so the package is a valid search space; each predicate below
- * was measured to match exactly one class inside that space on 12.13.0-release.0.
+ * **No resolver reads a host package-name constant.** That rule is the point of 1.49: six releases
+ * in a row replaced one hard-coded host coordinate with another. The search space is now
+ * [HostDex.classesMatching] over a needle — a word the host chose for the feature, not a package
+ * path — and every predicate is built only from properties that survive R8 and coroutine lowering:
+ * field and element types of live objects, framework types in signatures, enum constant names, and
+ * identity relationships between anchors already verified.
+ *
+ * The constants in [HostClasses] survive only as log annotation, so a miss can say "found where
+ * expected" or "the package moved" without either answer changing what was searched.
  *
  * Every resolver returns null/empty rather than throwing. A miss must degrade to "no download row",
  * never to an exception on X's UI thread.
@@ -61,86 +71,100 @@ internal object HostResolver {
     )
 
     /**
-     * The share-row model: exactly 3 `String` + 1 `Drawable` + 1 `boolean`, with data-class methods.
+     * The share-row model: exactly 3 `String` + 1 non-String reference + 1 `boolean`, with
+     * data-class methods.
      *
-     * Verified unique inside `com.x.models.share` (real: `models.share.a`, holding package name,
-     * activity name, label, icon, and a flag).
+     * Searched across every share-named package the host declares, not one recorded package. On
+     * 12.20.5 that space is 250 classes in 28 packages and this predicate matches exactly one of
+     * them (`models.share.a`, holding package name, activity name, label, icon and a flag), so
+     * widening the space costs no precision and buys survival of a package move.
      */
     fun rowClass(classLoader: ClassLoader): Class<*>? {
-        val hits = candidateClasses(classLoader, HostClasses.SHARE_ROW_PACKAGE)
+        val hits = candidateClasses(classLoader, SHARE_NEEDLE)
             .filter { isRowShape(it) }
             .toList()
-        if (hits.size != 1) {
-            DiagLog.line("row model: ${hits.size} candidates in ${HostClasses.SHARE_ROW_PACKAGE}")
-            return null
-        }
-        return hits[0]
+        if (hits.size == 1) return hits[0]
+        DiagLog.line("row model: ${hits.size} candidates in ${describeSpace(classLoader, SHARE_NEEDLE)}")
+        reportMiss(classLoader, HostClasses.SHARE_ROW_PACKAGE, SHARE_NEEDLE)
+        return null
     }
 
-    /** Shape match for one share row, split out so it can be asserted on directly. */
+    /**
+     * The share-row model across the three device-verified host generations:
+     *
+     *  - 12.13: `String,String,String,Drawable,boolean`
+     *  - 12.20.5: `String,String,String,Object,boolean`
+     *  - 12.24: `String,String,String,Object,M`, where `M` is exactly
+     *    `boolean,String,int`
+     *
+     * The 12.24 branch deliberately verifies the nested metadata shape instead of accepting any
+     * fifth reference field. The two non-String references then have distinct roles: the only field
+     * that is not metadata is the icon. The legacy branch rejects metadata-shaped icons for the same
+     * reason, so the new shape cannot make an unrelated data class a second candidate.
+     */
     internal fun isRowShape(cls: Class<*>): Boolean {
+        if (cls.isInterface || cls.isEnum || Modifier.isAbstract(cls.modifiers)) return false
         val fields = instanceFields(cls)
         if (fields.size != ROW_FIELD_COUNT) return false
-        val strings = fields.count { it.type == String::class.java }
-        val drawables = fields.count { it.type.name == DRAWABLE }
-        val booleans = fields.count { it.type == Boolean::class.javaPrimitiveType }
-        if (strings != 3 || drawables != 1 || booleans != 1) return false
+        if (fields.count { it.type == String::class.java } != 3) return false
+
+        val metadataTypes = fields.mapNotNull { field ->
+            field.type.takeIf { isRowMetadataShape(it) }
+        }.toSet()
+        val metadataFields = fields.filter { it.type in metadataTypes }
+        val legacyFlag = fields.singleOrNull { it.type == Boolean::class.javaPrimitiveType }
+        val iconFields = fields.filter {
+            it.type != String::class.java &&
+                it.type != Boolean::class.javaPrimitiveType &&
+                it.type !in metadataTypes &&
+                !it.type.isPrimitive
+        }
+        val fieldShapeMatches = when {
+            legacyFlag != null -> metadataFields.isEmpty() && iconFields.size == 1
+            metadataFields.size == 1 -> iconFields.size == 1
+            else -> false
+        }
+        if (!fieldShapeMatches) return false
+
         val methods = cls.declaredMethods.map { it.name }.toSet()
         return methods.containsAll(listOf("equals", "hashCode", "toString"))
     }
 
-    /**
-     * The method building the row list: `(String) -> ArrayList` on a class holding a `Context` and
-     * declaring a no-arg `PackageManager` getter.
-     *
-     * Verified unique inside `com.x.share.impl` (real: `share.impl.c.a`). `ArrayList` rather than
-     * `List` in the signature is deliberate — it is what the host declares, and it is also what
-     * makes appending safe: the concrete return type is mutable, so a row can be added in place
-     * without replacing the object the caller already holds.
-     */
-    fun rowProvider(classLoader: ClassLoader): Method? {
-        val hits = mutableListOf<Method>()
-        for (cls in candidateClasses(classLoader, HostClasses.SHARE_IMPL_PACKAGE)) {
-            if (instanceFields(cls).none { it.type == android.content.Context::class.java }) continue
-            val hasPmGetter = cls.declaredMethods.any {
-                it.parameterTypes.isEmpty() && it.returnType.name == PACKAGE_MANAGER
-            }
-            if (!hasPmGetter) continue
-            cls.declaredMethods.filterTo(hits) { m ->
-                !Modifier.isStatic(m.modifiers) &&
-                    m.parameterTypes.size == 1 &&
-                    m.parameterTypes[0] == String::class.java &&
-                    m.returnType == ArrayList::class.java
-            }
-        }
-        if (hits.size != 1) {
-            DiagLog.line("row provider: ${hits.size} candidates in ${HostClasses.SHARE_IMPL_PACKAGE}")
-            return null
-        }
-        return hits[0].also { it.isAccessible = true }
+    /** X 12.24's verified share-row metadata: one boolean, one String and one int. */
+    internal fun isRowMetadataShape(cls: Class<*>): Boolean {
+        if (cls.isPrimitive || cls.isArray || cls.isInterface || cls.isEnum ||
+            Modifier.isAbstract(cls.modifiers)
+        ) return false
+        val fields = instanceFields(cls)
+        return fields.size == ROW_METADATA_FIELD_COUNT &&
+            fields.count { it.type == Boolean::class.javaPrimitiveType } == 1 &&
+            fields.count { it.type == String::class.java } == 1 &&
+            fields.count { it.type == Int::class.javaPrimitiveType } == 1
     }
+
+
 
     /**
      * The tap action carrying a chosen row: a class whose instance fields are exactly
      * `(String, rowClass)`.
      *
-     * Verified unique inside `com.x.dms.components.sharesheet` including nested types
-     * (real: `sharesheet.t$g`). Taking [rowClass] as a parameter keeps this derived from an already
-     * verified anchor instead of a second independent guess.
+     * Derived from [rowClass] rather than searched for independently, which is what keeps it one
+     * anchor rather than two. On 12.20.5 this matches exactly one class in the *entire* APK
+     * (`sharesheet.s`), so the search space is not doing any of the work — the row type is.
      */
     fun actionClass(classLoader: ClassLoader, rowClass: Class<*>): Class<*>? {
-        val hits = candidateClasses(classLoader, HostClasses.SHARESHEET_PACKAGE, nested = true)
+        val hits = candidateClasses(classLoader, SHARE_NEEDLE)
             .filter { cls ->
                 val types = instanceFields(cls).map { it.type }
                 types.size == 2 && types[0] == String::class.java && types[1] == rowClass
             }
             .toList()
-        if (hits.size != 1) {
-            DiagLog.line("action model: ${hits.size} candidates in ${HostClasses.SHARESHEET_PACKAGE}")
-            return null
-        }
-        return hits[0]
+        if (hits.size == 1) return hits[0]
+        DiagLog.line("action model: ${hits.size} candidates in ${describeSpace(classLoader, SHARE_NEEDLE)}")
+        reportMiss(classLoader, HostClasses.SHARESHEET_PACKAGE, SHARE_NEEDLE)
+        return null
     }
+
 
     /**
      * Every method receiving a sheet action: `(actionRoot) -> void` on a class that also declares a
@@ -157,69 +181,154 @@ internal object HostResolver {
     fun dispatchPoints(classLoader: ClassLoader, actionRoot: Class<*>): List<DispatchPoint> {
         val found = mutableListOf<DispatchPoint>()
         val seen = mutableSetOf<String>()
-        for (pkg in DISPATCH_PACKAGES) {
-            for (cls in candidateClasses(classLoader, pkg)) {
-                val hasState = cls.declaredMethods.any {
-                    it.name == "getState" && it.parameterTypes.isEmpty()
-                }
-                if (!hasState) continue
-                for (m in cls.declaredMethods) {
-                    if (m.returnType != Void.TYPE) continue
-                    if (m.parameterTypes.size != 1) continue
-                    if (m.parameterTypes[0] != actionRoot) continue
-                    // An abstract method has no body to instrument, and XposedBridge.hookMethod
-                    // throws IllegalArgumentException on one, which aborted install() in
-                    // 1.5.0-probe. The filter belongs here, not at the call site: "dispatch point"
-                    // means somewhere execution can be intercepted, and an interface declaration
-                    // is not one. Implementors are returned separately, so nothing is lost.
-                    if (Modifier.isAbstract(m.modifiers)) continue
-                    if (seen.add("${cls.name}.${m.name}")) {
-                        m.isAccessible = true
-                        found.add(DispatchPoint(m, actionRoot))
-                    }
+        for (cls in candidateClasses(classLoader, SHARE_NEEDLE)) {
+            val hasState = cls.declaredMethods.any {
+                it.name == "getState" && it.parameterTypes.isEmpty()
+            }
+            if (!hasState) continue
+            for (m in cls.declaredMethods) {
+                if (m.returnType != Void.TYPE) continue
+                if (m.parameterTypes.size != 1) continue
+                if (m.parameterTypes[0] != actionRoot) continue
+                // An abstract method has no body to instrument, and XposedBridge.hookMethod
+                // throws IllegalArgumentException on one, which aborted install() in
+                // 1.5.0-probe. The filter belongs here, not at the call site: "dispatch point"
+                // means somewhere execution can be intercepted, and an interface declaration
+                // is not one. Implementors are returned separately, so nothing is lost.
+                if (Modifier.isAbstract(m.modifiers)) continue
+                if (seen.add("${cls.name}.${m.name}")) {
+                    m.isAccessible = true
+                    found.add(DispatchPoint(m, actionRoot))
                 }
             }
         }
         if (found.isEmpty()) {
             DiagLog.line("FATAL no dispatch (${actionRoot.simpleName})->void found")
-            DiagLog.line("      searched: ${DISPATCH_PACKAGES.joinToString(", ")}")
+            DiagLog.line("      searched: ${describeSpace(classLoader, SHARE_NEEDLE)}")
+            reportMiss(classLoader, HostClasses.SHARESHEET_PACKAGE, SHARE_NEEDLE)
         }
         return found
     }
 
     /**
-     * The method that puts the sheet on screen: `(X) -> boolean` on the class holding both a
-     * `ComposeView` and an `Activity`.
+     * The sheet's state type, read off the classes that already resolved as dispatch points.
      *
-     * **This anchor is confirmed off the path a tweet share takes.** 1.5.0-probe installed the hook
-     * successfully and it never fired once across three shares. Its four call sites are page-level
-     * entries (`app.main.l1`, `app.profiles.n0`, `browser.o`) plus one inside `chooser.b` -- the
-     * legacy chooser, not the Compose sheet that `com.x.share.impl` / `com.x.dms.components.sharesheet`
-     * actually drive. Reachable in the call graph and on the user's path are different properties,
-     * and the reachability gate can only prove the first.
+     * The criterion is the one property a state transform cannot lose: it takes the state and
+     * returns the state, so **the parameter type and the return type are the same class**. R8 cannot
+     * rename that relationship away and coroutine lowering cannot flatten it, because it is not a
+     * name and not a shape — it is an identity between two positions in one signature.
      *
-     * Kept resolved and hooked because a negative marker is still evidence: if it ever does fire,
-     * the host has switched sheet implementations. Sheet-open detection for the live path has to
-     * come from the packages the device proved, not from here.
+     * On 12.20.5 this is `sharesheet.g.b(y) -> y`, and it is unique: across all three classes that
+     * declare a dispatch method (`sharesheet.g`, `sharesheet.k`, `share.impl.b`) exactly one such
+     * method exists. Nothing is searched for here — [points] are already-verified anchors — so this
+     * adds no new coordinate to be wrong about, which is the whole reason it is derived rather than
+     * looked up.
+     *
+     * Three clauses beyond same-type-in-same-type-out, each rejecting a shape that is common and is
+     * not a sheet state:
+     *
+     *  - not `equals`, whose `(Object) -> boolean` never matches anyway but which would if a host
+     *    ever declared a covariant one;
+     *  - `S` is a host type, not a framework or JDK one. `f(String) -> String` is every formatter
+     *    ever written, and framework types in a signature are evidence *against* this being the
+     *    application's own state model.
+     *  - `S` declares at least one `List` field. The state has to hold the rows, so a candidate that
+     *    cannot hold a list is not the state this module needs — and this keeps the predicate honest
+     *    about what it is really claiming.
      */
-    fun sheetOpen(classLoader: ClassLoader): Method? {
-        val hits = mutableListOf<Method>()
-        for (cls in candidateClasses(classLoader, HostClasses.CHOOSER_PACKAGE)) {
-            val fieldTypes = instanceFields(cls).map { it.type.name }
-            if (COMPOSE_VIEW !in fieldTypes) continue
-            if (android.app.Activity::class.java.name !in fieldTypes) continue
-            cls.declaredMethods.filterTo(hits) { m ->
-                !Modifier.isStatic(m.modifiers) &&
-                    m.parameterTypes.size == 1 &&
-                    m.returnType == Boolean::class.javaPrimitiveType
-            }
-        }
-        if (hits.size != 1) {
-            DiagLog.line("sheet open: ${hits.size} candidates in ${HostClasses.CHOOSER_PACKAGE}")
-            return null
-        }
-        return hits[0].also { it.isAccessible = true }
+    fun stateClass(points: List<DispatchPoint>): Class<*>? {
+        val declarers = points.map { it.method.declaringClass }.distinct()
+        val hits = declarers.flatMap { cls -> stateTransformsOn(cls) }
+            .map { it.returnType }
+            .distinct()
+        if (hits.size == 1) return hits[0]
+        DiagLog.line("sheet state: ${hits.size} candidate type(s) from ${declarers.size} dispatch class(es)")
+        reportStateCandidates(declarers)
+        return null
     }
+
+    /**
+     * Every `(S) -> S` state transform declared on [cls]. Public to the module so a miss can report
+     * exactly what it rejected.
+     */
+    internal fun stateTransformsOn(cls: Class<*>): List<Method> = cls.declaredMethods.filter { m ->
+        !Modifier.isStatic(m.modifiers) &&
+            m.parameterTypes.size == 1 &&
+            m.parameterTypes[0] == m.returnType &&
+            m.name != "equals" &&
+            isHostType(m.returnType) &&
+            holdsAList(m.returnType)
+    }
+
+    /**
+     * Constructors of the sheet state that can carry a row list.
+     *
+     * The state is a Kotlin data class: its fields are final and its copy method takes the same
+     * arguments as its constructor, so **every** state instance the host ever renders is built here,
+     * whichever code path produced it. That is the property the module needs and the reducer method
+     * does not have — a reducer only sees the states it is itself asked to transform.
+     *
+     * Filtered to constructors with a `List` parameter, since a state with no list cannot be
+     * carrying the rows and hooking it would only cost work on the UI thread.
+     */
+    fun stateConstructors(stateClass: Class<*>): List<java.lang.reflect.Constructor<*>> =
+        stateClass.declaredConstructors
+            .filter { c -> c.parameterTypes.any { List::class.java.isAssignableFrom(it) } }
+            .onEach { it.isAccessible = true }
+
+    /** Whether [type] is the host's own model rather than a framework or language type. */
+    private fun isHostType(type: Class<*>): Boolean {
+        if (type.isPrimitive || type.isArray || type.isEnum) return false
+        val name = type.name
+        return FRAMEWORK_PREFIXES.none { name.startsWith(it) }
+    }
+
+    /** Whether [type] declares a field that can hold a list, i.e. can hold the rows. */
+    private fun holdsAList(type: Class<*>): Boolean =
+        type.declaredFields.any {
+            !Modifier.isStatic(it.modifiers) && List::class.java.isAssignableFrom(it.type)
+        }
+
+    /**
+     * Dumps every `(S) -> S` method seen on each dispatch class, when the state did not resolve.
+     *
+     * The 1.45–1.48 logs each proved a guess wrong without indicating the right one, and that cost
+     * four round trips through the user's device. So a state miss reports what it *did* see: the
+     * same-type-in-same-type-out methods it weighed, and — when there were none — the full one-arg
+     * signature list, which is the input the predicate consumes.
+     */
+    private fun reportStateCandidates(declarers: List<Class<*>>) {
+        for (cls in declarers) {
+            val transforms = stateTransformsOn(cls)
+            DiagLog.line("  dispatch class ${cls.name} (S)->S x${transforms.size}")
+            for (m in transforms.take(METHOD_REPORT_LIMIT)) {
+                DiagLog.line("    ${m.name}(${simpleTypeName(m.parameterTypes[0])}) -> " +
+                    "${simpleTypeName(m.returnType)} [${describeState(m.returnType)}]")
+            }
+            if (transforms.isNotEmpty()) continue
+            // No transform at all: report every one-arg method, since the predicate's inputs are the
+            // parameter and return types and only the log can say which clause did the rejecting.
+            var shown = 0
+            for (m in cls.declaredMethods) {
+                if (Modifier.isStatic(m.modifiers) || m.parameterTypes.size != 1) continue
+                if (shown >= METHOD_REPORT_LIMIT) {
+                    DiagLog.line("    ... more one-arg methods not shown")
+                    break
+                }
+                DiagLog.line("    ${m.name}(${simpleTypeName(m.parameterTypes[0])}) -> " +
+                    "${simpleTypeName(m.returnType)}")
+                shown++
+            }
+            if (shown == 0) DiagLog.line("    no one-arg instance method declared")
+        }
+    }
+
+    /** Why a same-type-in-same-type-out candidate was or was not accepted as the state. */
+    private fun describeState(type: Class<*>): String =
+        "host=${isHostType(type)} lists=${type.declaredFields.count {
+            !Modifier.isStatic(it.modifiers) && List::class.java.isAssignableFrom(it.type)
+        }}"
+
 
     /**
      * Whether [type] is a host tweet model.
@@ -362,44 +471,105 @@ internal object HostResolver {
         return null
     }
 
-    /** Loadable classes inside [pkg] whose names match R8's short-name scheme. */
-    private fun candidateClasses(
-        classLoader: ClassLoader,
-        pkg: String,
-        nested: Boolean = false,
-    ): Sequence<Class<*>> = candidatesIn(pkg, nested).mapNotNull { name ->
-        runCatching { classLoader.loadClass(name) }.getOrNull()
+    /**
+     * Loadable host classes whose package name contains [needle].
+     *
+     * This is the module's one search space, and it is deliberately not a package. Six releases in a
+     * row were sunk by a recorded package name: 1.7 by a prefix the device did not have, 1.45–1.48 by
+     * `com.x.share.impl` and `com.twitter.share.chooser` — the latter declaring no classes at all on
+     * 12.20.5. A needle survives the move a constant cannot, because a restructure renames the
+     * package but keeps the word: X's own engineers have to find this code too.
+     *
+     * The generated `a`..`z9` name guesses are gone with it. They only ever worked *inside* a known
+     * package, so they were a second consumer of the coordinate being removed, and the 20260828 log
+     * shows what they were worth on a wrong one: `0 candidates` in all three packages, meaning no
+     * shape predicate ever ran. Dex enumeration is what actually resolves the anchors on the device
+     * (`101601 class name(s) enumerated`), so a host where it fails resolves nothing and says so.
+     */
+    private fun candidateClasses(classLoader: ClassLoader, needle: String): Sequence<Class<*>> =
+        HostDex.classesMatching(classLoader, needle).asSequence().mapNotNull { name ->
+            runCatching { classLoader.loadClass(name) }.getOrNull()
+        }
+
+    /** The search space as one log-readable phrase: how wide it was, so `0 candidates` is legible. */
+    private fun describeSpace(classLoader: ClassLoader, needle: String): String {
+        val names = HostDex.classesMatching(classLoader, needle)
+        val packages = names.mapNotNull { it.substringBeforeLast('.', "").takeIf(String::isNotEmpty) }
+            .distinct().size
+        return "${names.size} class(es) across $packages package(s) matching '$needle'"
     }
 
     /**
-     * Obfuscated-name candidates inside a package.
+     * Reports a miss: whether the *expected* package still holds the anchor, what the classes there
+     * look like, and which packages the host actually uses for this feature.
      *
-     * R8 renames a class within its package rather than moving it out, so a drifted class is still
-     * findable this way. Nested names (`t$g`) are only generated when asked for, since that
-     * multiplies the search 26-fold and only the action model needs it.
+     * [expectedPkg] is annotation only — it is not what was searched. Its job is to answer "moved or
+     * reshaped?" in one line, which up to 1.44 took a release to establish. The census then names
+     * where to look instead, and the shape dump carries the field signatures the predicates consume,
+     * so the next fix is read off one device log rather than guessed.
      */
-    private fun candidatesIn(pkg: String, nested: Boolean = false): Sequence<String> = sequence {
-        val simple = sequence {
-            for (c in 'a'..'z') yield("$c")
-            for (c in 'a'..'z') for (d in '0'..'9') yield("$c$d")
+    internal fun reportMiss(classLoader: ClassLoader, expectedPkg: String, needle: String) {
+        if (HostDex.classesIn(classLoader, expectedPkg).isNotEmpty()) {
+            reportShapes(classLoader, expectedPkg)
+        } else {
+            DiagLog.line("  package $expectedPkg declares no classes on this host")
         }
-        for (s in simple) {
-            yield("$pkg.$s")
-            if (nested) for (inner in 'a'..'z') yield("$pkg.$s\$$inner")
+        // Printed on both branches, not just the empty one. 1.45 only reported the census when the
+        // recorded package was gone, so on 12.20.5 -- where the packages exist but every shape was
+        // rejected -- the log named no alternative at all. A restructure can move the row model to a
+        // sibling package while leaving the old one populated with unrelated classes, and that case
+        // has to be visible in the same log.
+        if (censusReported.add(needle)) {
+            HostDex.packageCensusFor(classLoader, needle).forEach { (name, n) ->
+                DiagLog.line("  candidate package $name ($n classes)")
+            }
         }
     }
 
+    /** Needles whose census is already in the log; every resolver shares "share". */
+    private val censusReported = mutableSetOf<String>()
 
-    // ---- tweet action sheet (the path the module injects into) --------------
-    //
-    // Located by shape inside com.twitter.tweet.action.legacy. Reachability was established
-    // separately, with a disassembler, because shape cannot detect dead code: e0.h has 3 direct
-    // call sites and the cluster around it is entered by 57 classes from outside the package,
-    // including com.twitter.timeline.g, com.twitter.tweetdetail.q1 and com.twitter.app.gallery.j1
-    // -- the timeline, the tweet detail screen and the gallery.
+    internal fun resetCensusForTest() {
+        censusReported.clear()
+    }
 
+    /**
+     * Dumps the shape of every class in the package the anchor was last seen in.
+     *
+     * This is the case the 20260828 1.45 log exposed and 1.45 itself could not act on. Two of the
+     * three packages printed `0 candidates` *without* a "declares no classes" line, so [HostDex] did
+     * find real classes there and it was the shape predicates that rejected all of them:
+     * `com.x.share.impl` and `com.x.models.share` still exist on 12.20.5, their contents were
+     * restructured.
+     *
+     * "The package moved" and "the shape changed" became distinguishable in 1.45, but a shape change
+     * is still unactionable without knowing what the new shape *is*. So each candidate's field
+     * signature — exactly the input the predicates consume — goes into the log. Reading it off one
+     * device log is what replaced the fifth guess with the 12.20.5 row shape.
+     */
+    private fun reportShapes(classLoader: ClassLoader, pkg: String) {
+        val names = HostDex.classesIn(classLoader, pkg)
+        DiagLog.line("  package $pkg has ${names.size} class(es); shapes follow")
+        var shown = 0
+        for (name in names) {
+            if (shown >= SHAPE_REPORT_LIMIT) {
+                DiagLog.line("  ... ${names.size - shown} more class(es) not shown")
+                break
+            }
+            val cls = runCatching { classLoader.loadClass(name) }.getOrNull() ?: continue
+            val fields = runCatching { instanceFields(cls) }.getOrNull() ?: continue
+            val sig = fields.joinToString(",") { simpleTypeName(it.type) }.take(SHAPE_SIG_LIMIT)
+            DiagLog.line("  shape ${name.substringAfterLast('.')} [$sig]")
+            shown++
+        }
+    }
 
-
+    /** Short type name for a shape line: `java.lang.String` is noise at 40 lines per package. */
+    internal fun simpleTypeName(type: Class<*>): String = when {
+        type.isPrimitive -> type.name
+        type.isArray -> simpleTypeName(type.componentType!!) + "[]"
+        else -> type.name.substringAfterLast('.')
+    }
 
     /** Instance fields of [cls] and its superclasses, nearest class first. */
     private fun instanceFields(cls: Class<*>): List<java.lang.reflect.Field> {
@@ -409,23 +579,51 @@ internal object HostResolver {
             out += c.declaredFields.filter { !Modifier.isStatic(it.modifiers) }
             c = c.superclass
         }
-        out.forEach { it.isAccessible = true }
+        // Shape resolution reads only Field.type and modifiers; opening every field is unnecessary
+        // and fails on JDK 17 module-owned classes (for example java.lang.Object). Callers that read
+        // values make their selected host fields accessible at the point of use.
         return out
     }
 
-    /** Packages declaring a method that receives a sheet action. */
-    private val DISPATCH_PACKAGES = listOf(
-        HostClasses.SHARE_IMPL_PACKAGE,
-        HostClasses.SHARESHEET_PACKAGE,
-    )
-
-    /** Field count of the share-row model on the verified build. */
+    /** Field count of the share-row model on the verified builds. */
     private const val ROW_FIELD_COUNT = 5
 
-    private const val DRAWABLE = "android.graphics.drawable.Drawable"
-    private const val PACKAGE_MANAGER = "android.content.pm.PackageManager"
-    private const val COMPOSE_VIEW = "androidx.compose.ui.platform.ComposeView"
-    private const val FRAGMENT_MANAGER = "androidx.fragment.app.FragmentManager"
+    /** Field count of X 12.24's nested share-row metadata object. */
+    private const val ROW_METADATA_FIELD_COUNT = 3
+
+    /**
+     * Classes whose shape is dumped per package on a miss.
+     *
+     * Bounded because `com.x.share.impl` can hold dozens of classes and the diagnostic must not push
+     * the lines it exists to contextualise out of a 512-line queue.
+     */
+    private const val SHAPE_REPORT_LIMIT = 40
+
+    /** Cap for one shape signature, so a wide class cannot produce an unreadable line. */
+    private const val SHAPE_SIG_LIMIT = 200
+
+    /** Candidate methods dumped per holder class on a row-provider miss. */
+    private const val METHOD_REPORT_LIMIT = 12
+
+    /**
+     * The word every share-sheet anchor is searched under.
+     *
+     * A feature word, not a coordinate. On 12.20.5 it spans 28 packages and 250 classes, which
+     * covers `com.x.models.share`, `com.x.share.impl` and `com.x.dms.components.sharesheet` at once —
+     * the three packages 1.48 named separately and got wrong separately.
+     */
+    private const val SHARE_NEEDLE = "share"
+
+    /**
+     * Package prefixes that mark a type as framework rather than host model.
+     *
+     * Used to reject `(String) -> String` and friends when looking for the sheet state. These are
+     * safe to hard-code in a way host package names are not: they are Android, Kotlin and JDK
+     * namespaces, fixed by their own vendors, and R8 cannot rename what it does not own.
+     */
+    private val FRAMEWORK_PREFIXES = listOf(
+        "java.", "javax.", "kotlin.", "kotlinx.", "android.", "androidx.", "dalvik.", "sun.",
+    )
     /**
      * Numeric field count a media entity must reach, alongside its URL.
      *

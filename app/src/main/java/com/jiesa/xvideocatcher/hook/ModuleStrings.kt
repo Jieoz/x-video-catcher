@@ -14,7 +14,7 @@ import android.content.Context
 internal class ModuleStrings {
 
     fun downloadLabel(context: Context): String =
-        if (isChinese(context)) "下载视频" else "Download video"
+        if (isChinese(context)) "下载媒体" else "Download media"
 
     fun startedLabel(context: Context, count: Int): String =
         if (isChinese(context)) "开始下载 $count 个文件" else "Downloading $count file(s)"
@@ -27,6 +27,12 @@ internal class ModuleStrings {
 
     fun noMediaLabel(context: Context): String =
         if (isChinese(context)) "这条推文没有可下载的媒体" else "No downloadable media"
+
+    fun progressTitle(context: Context): String =
+        if (isChinese(context)) "正在下载媒体" else "Downloading media"
+
+    fun progressDetail(context: Context, index: Int, total: Int): String =
+        if (isChinese(context)) "第 $index / $total 个" else "$index / $total"
 
     private fun isChinese(context: Context): Boolean =
         context.resources.configuration.locales[0].language == "zh"

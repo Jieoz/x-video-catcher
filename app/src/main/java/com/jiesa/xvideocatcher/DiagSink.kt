@@ -105,12 +105,101 @@ internal object DiagSink {
     /** Appends [lines], one per line. Returns false if nothing could be written. */
     fun append(context: Context, lines: List<String>): Boolean {
         if (lines.isEmpty()) return true
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            appendTo(MediaStoreRows(context), payloadOf(lines))
-        } else {
-            synchronized(writeLock) { appendViaFile(payloadOf(lines)) }
-        }
+        val payload = payloadOf(lines)
+        return appendEverywhere(context, payload)
     }
+
+    /**
+     * Writes [payload] through every channel available to the host process, and reports whether
+     * *any* of them took it.
+     *
+     * Each channel is attempted independently and on purpose. There is no single path that works
+     * across the versions this module has to run on, and the previous builds picked one, failed
+     * silently, and left zero observability — which is exactly the state that made the last several
+     * releases undiagnosable:
+     *
+     *  - [appendViaFile] writes `Download/XVideoCatcher/` directly. Only legal for a host with
+     *    legacy external storage; on API 29+ scoped storage this is EACCES.
+     *  - [MediaStoreRows] is the scoped-storage path. It works, but MediaStore enforces *ownership*:
+     *    the host can only reopen rows it created itself, so a row the module app inserted (the
+     *    `diag_enabled` flag is one) is not writable from here.
+     *  - [appendViaAppExternal] writes the host's own `getExternalFilesDir`. Always writable, never
+     *    permission-gated, and the reason the log can no longer come back empty.
+     *
+     * The last channel is the guarantee. The first two are kept because they land the file where the
+     * user can actually reach it without a rooted file manager.
+     */
+    private fun appendEverywhere(context: Context, payload: String): Boolean {
+        // FIRST MATCH WINS, and that is the fix for the 31-fragment log.
+        //
+        // Every channel below targets the same file name. Running them all on every flush had two
+        // writers pointed at `Download/XVideoCatcher/xvc-diag-<date>.txt` at once: the direct file
+        // write created the file on disk, and MediaStore — which cannot see or own that unscanned
+        // file — resolved `find()` to nothing and called `create()` instead, on every flush. Because
+        // MediaStore refuses to reuse a display name that already exists on disk, it suffixed each
+        // one: `xvc-diag-20260828 (1).txt` … `(31).txt`. The 20260828 report is exactly that, 31
+        // fragments of a 318-line session, and it is why the log looked "very messy".
+        //
+        // One session must produce one file, so exactly one channel writes and the rest are
+        // fallbacks used only when it fails.
+        val channels = buildList<Pair<String, () -> Boolean>> {
+            add("download-file" to { synchronized(writeLock) { appendViaFile(payload) } })
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                add("mediastore" to { appendTo(MediaStoreRows(context), payload) })
+            }
+            add("app-external" to { appendViaAppExternal(context, payload) })
+        }
+
+        for ((name, write) in channels) {
+            val result = runCatching { write() }
+            if (result.getOrDefault(false)) {
+                if (name != activeChannel) {
+                    HostLog.log("DiagSink: writing via $name (${payload.length} bytes)")
+                    activeChannel = name
+                }
+                return true
+            }
+            HostLog.log(
+                "DiagSink: $name channel failed: " +
+                    (result.exceptionOrNull()
+                        ?.let { it.javaClass.simpleName + ": " + it.message }
+                        ?: "returned false"),
+            )
+        }
+        HostLog.log("DiagSink: every sink refused the payload")
+        return false
+    }
+
+    /**
+     * Channel that last accepted a write, so the choice is logged once instead of per flush.
+     *
+     * Diagnostic only: the selection above is recomputed every time, because a channel that works at
+     * attach time can be revoked later and a cached decision would send the rest of the session
+     * nowhere.
+     */
+    @Volatile
+    private var activeChannel: String? = null
+
+    /**
+     * The host's own external files dir — `Android/data/<host>/files/XVideoCatcher/`.
+     *
+     * Unconditionally writable by the host process: no permission, no scoped-storage gate, no
+     * MediaStore ownership rule. Its only drawback is that Android 11+ hides `Android/data` from
+     * third-party file managers, so it is a fallback for retrieval, not the primary. It exists so
+     * that "the log is empty" and "the hook never ran" stop being the same observation.
+     */
+    private fun appendViaAppExternal(context: Context, payload: String): Boolean = runCatching {
+        val base = context.getExternalFilesDir(null) ?: return false
+        appendInto(File(base, DIR_NAME), payload)
+    }.getOrElse {
+        HostLog.log("DiagSink: app-external write failed: $it")
+        false
+    }
+
+    /** Where [appendViaAppExternal] puts the file, for the log line that tells the user. */
+    fun appExternalPath(context: Context): String = runCatching {
+        File(File(context.getExternalFilesDir(null), DIR_NAME), fileName()).absolutePath
+    }.getOrDefault("(unavailable)")
 
     /**
      * Find-or-create the row, then append to it. The one place this ordering exists.
@@ -193,6 +282,14 @@ internal object DiagSink {
         )
         return appendInto(dir, payload)
     }
+
+    /**
+     * Direct file write fallback for the HOST process (X has storage permission).
+     * Used when MediaStore.Downloads fails silently — which it does on some OEMs
+     * when the host app doesn't own the file. X has WRITE_EXTERNAL_STORAGE so
+     * direct File access works.
+     */
+
 
     /**
      * Appends [payload] into [dir], creating it if needed.

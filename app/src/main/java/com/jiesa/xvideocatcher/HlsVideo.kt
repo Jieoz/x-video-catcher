@@ -67,27 +67,63 @@ object HlsVideo {
      * video-only file with a logged warning, because a silent video is still what the user
      * asked for; a failed *video* track is fatal.
      */
-    fun saveTo(plan: Plan, workDir: File, sink: OutputStream): Long {
+    /**
+     * @param onProgress optional `(bytesDone, totalHint)` callback. [totalHint] is 0 when the
+     * size is not yet known; callers treat that as indeterminate. Fires from the worker
+     * thread — UI posting is the caller's job.
+     */
+    fun saveTo(
+        plan: Plan,
+        workDir: File,
+        sink: OutputStream,
+        onProgress: ((done: Long, totalHint: Long) -> Unit)? = null,
+    ): Long {
         val stamp = System.nanoTime()
         val videoFile = File(workDir, "xvc_v_$stamp.mp4")
         val audioFile = File(workDir, "xvc_a_$stamp.mp4")
         val muxedFile = File(workDir, "xvc_m_$stamp.mp4")
         try {
-            val video = assemble(plan.variant.url, videoFile)
-                ?: throw java.io.IOException("video track assembly failed")
+            var transferred = 0L
+            var totalHint = 0L
+            fun report() {
+                onProgress?.invoke(transferred, totalHint)
+            }
+
+            val video = assemble(plan.variant.url, videoFile) { part, segs ->
+                if (segs > 0 && totalHint == 0L) {
+                    totalHint = (segs + 1L) * 400_000L
+                }
+                transferred = part
+                if (transferred > totalHint) totalHint = transferred + 400_000L
+                report()
+            } ?: throw java.io.IOException("video track assembly failed")
             DiagLog.line("  video track ${video.bytes} bytes")
+            transferred = video.bytes
+            totalHint = maxOf(totalHint, video.bytes)
+            report()
 
             val audio = plan.audio?.let { track ->
-                assemble(track.url, audioFile).also {
+                assemble(track.url, audioFile) { part, segs ->
+                    transferred = video.bytes + part
+                    if (segs > 0) totalHint = maxOf(totalHint, video.bytes + (segs + 1L) * 50_000L)
+                    if (transferred > totalHint) totalHint = transferred + 50_000L
+                    report()
+                }.also {
                     if (it == null) DiagLog.line("  audio track failed, saving video only")
                     else DiagLog.line("  audio track ${it.bytes} bytes")
                 }
             }
             if (plan.audio == null) DiagLog.line("  no audio rendition in master, video only")
+            if (audio != null) {
+                transferred = video.bytes + audio.bytes
+                totalHint = transferred
+                report()
+            }
 
             mux(video.file, audio?.file, muxedFile)
             val written = muxedFile.inputStream().use { it.copyTo(sink) }
             if (written <= 0L) throw java.io.IOException("mux produced 0 bytes")
+            onProgress?.invoke(written, written)
             return written
         } finally {
             // Every path, including the throwing ones: these are tens of megabytes inside
@@ -104,7 +140,15 @@ object HlsVideo {
      * precisely the bug this rewrite fixes, so the absence is treated as failure rather
      * than skipped.
      */
-    private fun assemble(playlistUrl: String, target: File): Track? {
+    /**
+     * @param onPart `(cumulativeBytes, segmentCount)` after playlist parse; used by [saveTo]
+     * to build a totalHint for progress notifications.
+     */
+    private fun assemble(
+        playlistUrl: String,
+        target: File,
+        onPart: ((cumulative: Long, segmentCount: Int) -> Unit)? = null,
+    ): Track? {
         val text = runCatching { Http.text(playlistUrl) }.getOrNull() ?: return null
         val playlist = Hls.parseMedia(text, playlistUrl)
         val init = playlist.initUrl ?: run {
@@ -115,11 +159,21 @@ object HlsVideo {
             DiagLog.line("  playlist has no segments: $playlistUrl")
             return null
         }
+        val segCount = playlist.segments.size
         return runCatching {
             var total = 0L
             target.outputStream().buffered().use { out ->
-                total += Http.copyTo(init, out)
-                for (seg in playlist.segments) total += Http.copyTo(seg, out)
+                total += Http.copyTo(init, out) { running ->
+                    onPart?.invoke(running, segCount)
+                }
+                var base = total
+                for (seg in playlist.segments) {
+                    val n = Http.copyTo(seg, out) { running ->
+                        onPart?.invoke(base + running, segCount)
+                    }
+                    total += n
+                    base = total
+                }
             }
             Track(target, total)
         }.getOrElse {

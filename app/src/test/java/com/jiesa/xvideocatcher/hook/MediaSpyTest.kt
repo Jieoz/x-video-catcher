@@ -6,6 +6,7 @@ import androidx.media3.datasource.ReorderedDecoy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -176,7 +177,7 @@ class MediaSpyTest {
         // Inverted in 1.19. This test asserted the opposite through 1.18 and is why the bug
         // shipped green: the `.mp4` it preferred is an fMP4 header with no frames, so every save
         // produced a few dozen unplayable KB. Only a master leads to a complete file.
-        assertEquals(master, MediaSpy.best()?.url)
+        assertEquals(master, MediaSpy.best().firstOrNull()?.url)
     }
 
     /** An init segment alone is not downloadable: no master means no row, not a broken save. */
@@ -184,7 +185,7 @@ class MediaSpyTest {
     fun initSegmentAloneIsNotDownloadable() {
         MediaSpy.clear()
         record("https://video.twimg.com/amplify_video/1/vid/avc1/0/0/1080x1920/only.mp4")
-        assertNull(MediaSpy.best())
+        assertTrue(MediaSpy.best().isEmpty())
     }
 
     /**
@@ -215,7 +216,7 @@ class MediaSpyTest {
         Thread.sleep(2)
         record("https://video.twimg.com/amplify_video/2/vid/avc1/0/0/480x852/small.mp4")
         record("https://video.twimg.com/amplify_video/2/pl/small.m3u8")
-        assertEquals("https://video.twimg.com/amplify_video/2/pl/small.m3u8", MediaSpy.best()?.url)
+        assertEquals("https://video.twimg.com/amplify_video/2/pl/small.m3u8", MediaSpy.best().firstOrNull()?.url)
     }
 
     /** Within one kind, the video the user is watching now wins. */
@@ -227,7 +228,7 @@ class MediaSpyTest {
         record(older)
         Thread.sleep(2)
         record(newer)
-        assertEquals(newer, MediaSpy.best()?.url)
+        assertEquals(newer, MediaSpy.best().firstOrNull()?.url)
     }
 
     /**
@@ -250,7 +251,7 @@ class MediaSpyTest {
         record(stale)
         Thread.sleep(2)
         record(fresh)
-        assertEquals(fresh, MediaSpy.best()?.url)
+        assertEquals(fresh, MediaSpy.best().firstOrNull()?.url)
     }
 
     /**
@@ -277,21 +278,149 @@ class MediaSpyTest {
         Thread.sleep(2)
         // A segment of the watched video arrives last -- this is what identifies the group.
         record("https://video.twimg.com/amplify_video/100/vid/avc1/0/0/720x1280/init.mp4")
-        assertEquals(watched, MediaSpy.best()?.url)
+        assertEquals(watched, MediaSpy.best().firstOrNull()?.url)
     }
 
-    /** Photos are captured for diagnostics but must never be what the download row offers. */
+    /**
+     * A recent tweet photo must be offered for download.
+     *
+     * 1.20 device log proved OkHttp captures /media/ URLs; the bug was best() discarding them
+     * and falling back to an unrelated HLS master. Inverted: photo-only capture must yield PHOTO.
+     */
     @Test
-    fun bestIgnoresPhotos() {
+    fun bestOffersRecentTweetPhoto() {
         MediaSpy.clear()
-        record("https://pbs.twimg.com/media/AbCdEf.jpg?format=jpg&name=orig")
-        assertNull(MediaSpy.best())
+        val photo = "https://pbs.twimg.com/media/AbCdEfGh?format=jpg&name=large"
+        record(photo)
+        val hit = MediaSpy.best().firstOrNull()
+        assertNotNull(hit)
+        assertEquals(MediaSpy.Kind.PHOTO, hit!!.kind)
+        assertEquals(photo, hit.url)
+    }
+
+    /**
+     * When the user is looking at a photo, do not fall back to a scrolled-past video.
+     * Device 1.19/1.20: tap on image tweet saved x_<unrelated_media_id>.mp4.
+     */
+    @Test
+    fun photoContextNeverFallsBackToUnrelatedVideo() {
+        MediaSpy.clear()
+        record("https://video.twimg.com/amplify_video/111/pl/old.m3u8")
+        Thread.sleep(2)
+        record("https://pbs.twimg.com/media/FocusKey?format=jpg&name=large")
+        val hits = MediaSpy.best()
+        assertEquals(1, hits.size)
+        assertEquals(MediaSpy.Kind.PHOTO, hits[0].kind)
+        assertTrue(hits[0].url.contains("FocusKey"))
+    }
+
+    /** Video posters are not tweet photos — alone they must not become a download target. */
+    @Test
+    fun videoPosterAloneIsNotDownloadable() {
+        MediaSpy.clear()
+        record("https://pbs.twimg.com/amplify_video_thumb/999/img/poster.jpg")
+        assertTrue(MediaSpy.best().isEmpty())
+    }
+
+
+
+    /**
+     * VIDEO_INIT traffic after a display photo must not flip selection to a master.
+     * Device 1.21: continuous init segments made every photo lose pure recency.
+     */
+    @Test
+    fun videoInitFloodDoesNotBeatDisplayPhoto() {
+        MediaSpy.clear()
+        val photo = "https://pbs.twimg.com/media/FocusKey?format=jpg&name=large"
+        record(photo)
+        Thread.sleep(2)
+        record("https://video.twimg.com/amplify_video/111/vid/avc1/0/0/720x1280/init.mp4")
+        record("https://video.twimg.com/amplify_video/111/pl/old.m3u8")
+        // master is newer than photo, but only via init-driven "video activity" — display photo
+        // still loses to a newer master today; pin the intended rule: newer MASTER wins,
+        // init alone after photo must not create a master-less steal. Here master exists and
+        // is newer, so video wins. Separate case below: init without new master.
+        record(photo) // re-focus photo after flood
+        Thread.sleep(2)
+        record("https://video.twimg.com/amplify_video/111/vid/avc1/0/0/720x1280/init2.mp4")
+        val hits = MediaSpy.best()
+        assertEquals(MediaSpy.Kind.PHOTO, hits.firstOrNull()?.kind)
+        assertTrue(hits.first().url.contains("FocusKey"))
+    }
+
+    @Test
+    fun tinyThumbDoesNotBeatMaster() {
+        MediaSpy.clear()
+        record("https://video.twimg.com/amplify_video/5/pl/watch.m3u8")
+        Thread.sleep(2)
+        record("https://pbs.twimg.com/media/TinyOnly?format=webp&name=tiny")
+        assertEquals(
+            "https://video.twimg.com/amplify_video/5/pl/watch.m3u8",
+            MediaSpy.best().firstOrNull()?.url,
+        )
+    }
+
+
+
+    /**
+     * 1.23 focus lock: a display photo the user focused must win even when a later
+     * prefetched master arrives (timeline scroll after looking at a photo).
+     *
+     * Without focus, pure recency would hand the newer master; with focus the photo key
+     * stays locked until a stronger signal (another display photo / played video) replaces it.
+     */
+    @Test
+    fun focusLockHoldsPhotoAgainstLaterPrefetchMaster() {
+        MediaSpy.clear()
+        val photo = "https://pbs.twimg.com/media/FocusKey?format=jpg&name=large"
+        record(photo)
+        Thread.sleep(2)
+        record("https://video.twimg.com/amplify_video/999/pl/prefetched.m3u8")
+        val hits = MediaSpy.best()
+        assertEquals(MediaSpy.Kind.PHOTO, hits.firstOrNull()?.kind)
+        assertTrue(hits.first().url.contains("FocusKey"))
+    }
+
+    /**
+     * 1.23 focus lock: VIDEO_INIT of the watched video keeps that master even when a
+     * newer prefetched master appears (same shape as masterMustBelongToTheVideoBeingWatched,
+     * asserted via the focus path so removing updateFocus turns this red independently).
+     */
+    @Test
+    fun focusLockHoldsWatchedVideoAgainstPrefetch() {
+        MediaSpy.clear()
+        val watched = "https://video.twimg.com/amplify_video/100/pl/watched.m3u8"
+        record(watched)
+        record("https://video.twimg.com/amplify_video/100/vid/avc1/0/0/720x1280/init.mp4")
+        Thread.sleep(2)
+        record("https://video.twimg.com/amplify_video/200/pl/prefetched.m3u8")
+        assertEquals(watched, MediaSpy.best().firstOrNull()?.url)
+    }
+
+    /** Freezing at panel open must be what downloadCaptured reads, not a later best(). */
+    @Test
+    fun frozenHitsOverrideLiveBest() {
+        MediaSpy.clear()
+        DownloaderState.clearFreeze()
+        val first = "https://video.twimg.com/amplify_video/1/pl/first.m3u8"
+        record(first)
+        val frozen = MediaSpy.best()
+        DownloaderState.freeze(frozen)
+        Thread.sleep(2)
+        record("https://video.twimg.com/amplify_video/2/pl/second.m3u8")
+        // Live best would be second; frozen must still be first.
+        assertEquals(first, DownloaderState.targetHits().firstOrNull()?.url)
+        DownloaderState.clearFreeze()
+        assertEquals(
+            "https://video.twimg.com/amplify_video/2/pl/second.m3u8",
+            DownloaderState.targetHits().firstOrNull()?.url,
+        )
     }
 
     @Test
     fun bestIsNullBeforeAnythingIsSeen() {
         MediaSpy.clear()
-        assertNull(MediaSpy.best())
+        assertTrue(MediaSpy.best().isEmpty())
     }
 
     /**

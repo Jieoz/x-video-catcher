@@ -1,6 +1,7 @@
 package com.jiesa.xvideocatcher.hook
 
 import com.jiesa.xvideocatcher.DiagLog
+import com.jiesa.xvideocatcher.HostLog
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import java.lang.reflect.Modifier
@@ -42,18 +43,23 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
 
     fun install() {
         val row = HostResolver.rowClass(classLoader)
-        val provider = HostResolver.rowProvider(classLoader)
-        val open = HostResolver.sheetOpen(classLoader)
         val action = row?.let { HostResolver.actionClass(classLoader, it) }
         val dispatches = action?.superclass
             ?.let { HostResolver.dispatchPoints(classLoader, it) }
             ?: emptyList()
+        // The state type is DERIVED from the dispatch points, which the device already proved live,
+        // rather than searched for independently. The `(S) -> S` transform is used only to identify
+        // S; it is deliberately NOT hooked. On 12.20.5 that transform (`g.b`) normalises a String
+        // field and never touches the row list, so hooking it would observe nothing -- the same
+        // shape-over-reachability error that cost 1.2-1.4.
+        val state = HostResolver.stateClass(dispatches)
+        val constructors = state?.let { HostResolver.stateConstructors(it) } ?: emptyList()
 
         // One resolution summary, so a miss is attributable to a specific anchor rather than to
         // "the probe did nothing".
         DiagLog.line("${ProbeMarkers.RESOLVE} row=${row?.name ?: "MISS"}")
-        DiagLog.line("${ProbeMarkers.RESOLVE} provider=${provider?.let { "${it.declaringClass.name}.${it.name}" } ?: "MISS"}")
-        DiagLog.line("${ProbeMarkers.RESOLVE} open=${open?.let { "${it.declaringClass.name}.${it.name}" } ?: "MISS"}")
+        DiagLog.line("${ProbeMarkers.RESOLVE} state=${state?.name ?: "MISS"}")
+        DiagLog.line("${ProbeMarkers.RESOLVE} state-ctor=${constructors.size}")
         DiagLog.line("${ProbeMarkers.RESOLVE} action=${action?.name ?: "MISS"}")
         DiagLog.line("${ProbeMarkers.RESOLVE} dispatch=${dispatches.size} point(s)")
         dispatches.forEach {
@@ -65,8 +71,11 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
         // the flush and the XposedBridge summary below. The result was the failure mode this build
         // exists to eliminate: partial instrumentation that reads as total silence. A hook that
         // cannot be installed is a fact to report, not a reason to abandon the others.
-        installHook("sheet-open") { open?.let { hookSheetOpen(it) } }
-        installHook("row-provider") { provider?.let { hookRowProvider(it) } }
+        if (row != null) {
+            constructors.forEachIndexed { n, ctor ->
+                installHook("state-ctor-$n") { hookStateConstructor(ctor, row) }
+            }
+        }
         dispatches.forEach { point ->
             installHook("dispatch ${point.method.declaringClass.name}.${point.method.name}") {
                 hookDispatch(point)
@@ -74,8 +83,7 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
         }
 
         DiagLog.flushNow()
-        XposedBridge.log(
-            "XVC probe: open=${open != null} provider=${provider != null} " +
+        HostLog.log("probe: state=${state != null} ctor=${constructors.size} " +
                 "row=${row != null} action=${action != null} dispatch=${dispatches.size}"
         )
     }
@@ -150,61 +158,63 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
     }
 
     /**
-     * Records the row list the sheet renders from.
+     * Records the sheet state as it is constructed, and which argument carries the rows.
      *
-     * Hooked `after`: the return value is the point of interest, and reading it proves the list is
-     * both reachable and mutable at exactly the moment a row would be appended in the real build.
+     * Hooked `before` on the **constructor**, not on a reducer. The state is a Kotlin data class, so
+     * its `copy` compiles to a static method ending in a constructor call: every state instance the
+     * host renders passes through here whichever code path produced it. A reducer only sees the
+     * states it is itself handed, and on 12.20.5 the reducer is invoked from the component
+     * constructor and from the action handler -- never with a state that has rows in it.
+     *
+     * The row argument is identified by [SheetRows.locate], i.e. by what the list actually holds at
+     * runtime. This state declares three separate `List` fields and reflection erases all three to
+     * bare `java.util.List`, so no signature can tell them apart; the element type can, and that
+     * property survives R8, coroutine lowering, and field reordering.
+     *
+     * Early states carry no rows yet (the row list arrives from a coroutine). Those are reported and
+     * left alone rather than guessed at -- a null slot is the normal case, not a miss.
      */
-    private fun hookRowProvider(method: java.lang.reflect.Method) {
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
+    private fun hookStateConstructor(ctor: java.lang.reflect.Constructor<*>, rowClass: Class<*>) {
+        XposedBridge.hookMethod(ctor, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
                 runCatching {
-                    val rows = param.result as? java.util.ArrayList<*>
-                    if (rows == null) {
-                        DiagLog.line("${ProbeMarkers.ROWS_BUILT} result=${param.result?.javaClass?.name ?: "null"}")
+                    val slot = SheetRows.locate(param.args, rowClass)
+                    if (slot == null) {
+                        // Not yet populated. Logged at low volume because it is expected several
+                        // times per sheet open, and its absence would hide a genuine anchor problem.
+                        DiagLog.line("${ProbeMarkers.ROWS_BUILT} no row-bearing arg (pre-load state)")
                         return
                     }
-                    DiagLog.line("${ProbeMarkers.ROWS_BUILT} ${rows.size} row(s), arg=${param.args.getOrNull(0)}")
-                    rows.take(MAX_ROWS_LOGGED).forEach { r ->
+                    DiagLog.line(
+                        "${ProbeMarkers.ROWS_BUILT} ${slot.rows.size} row(s) " +
+                            "at arg[${slot.argIndex}], status=${SheetRows.statusIdIn(param.args) ?: "none"}"
+                    )
+                    slot.rows.take(MAX_ROWS_LOGGED).forEach { r ->
                         DiagLog.line("PROBE   row ${describeRow(r)}")
                     }
-                    if (rows.size > MAX_ROWS_LOGGED) {
-                        DiagLog.line("PROBE   ... ${rows.size - MAX_ROWS_LOGGED} more")
+                    if (slot.rows.size > MAX_ROWS_LOGGED) {
+                        DiagLog.line("PROBE   ... ${slot.rows.size - MAX_ROWS_LOGGED} more")
                     }
-                    // Prove the list accepts a write here, without leaving anything in the UI:
-                    // append a row-typed clone of the first entry, then remove it. If this throws,
-                    // the real build cannot inject and needs a different insertion point.
-                    val mutable = probeMutability(rows)
-                    DiagLog.line("${ProbeMarkers.LIST_MUTABLE}$mutable")
-                    // Tweet reachability is asked here, not at sheet-open. 1.5.0-probe attached it
-                    // to the sheet-open hook, which is off the live path and never fired -- so the
-                    // one question the probe existed to answer came back blank. This hook is
-                    // device-proven to run, and its receiver is the provider that built the rows.
-                    // The arg was only ever the share URL string, so the receiver is where a tweet
-                    // reference can plausibly live.
-                    findTweetFrom("rows-provider", param.thisObject)
+                    // Whether a row could be substituted here, without touching the live sheet.
+                    // 1.50: this must NOT go through SheetRows.substitute any more. That call used to
+                    // be free because it overwrote a slot with the object already in it; now it
+                    // inserts, and its fallback branch writes to the host's live list -- which a
+                    // copied argument array still points at. So the probe asks the type question
+                    // directly instead of performing a write to find out.
+                    val writable = SheetRows.canSubstitute(ctor.parameterTypes, slot)
+                    DiagLog.line("${ProbeMarkers.LIST_MUTABLE}$writable")
+                    // No findTweetFrom() here. This constructor runs on the sheet's own render path,
+                    // 13 times per open on the 20260829 log, and each graph search cost ~1,700 node
+                    // visits to report `media extracted: 0 item(s)` -- 352 searches, 0 hits, every
+                    // time. It cannot hit: the live share path carries a status URL, not a tweet
+                    // (1.6.0 established that), and MediaSpy supplies the media from the player
+                    // instead. Kept on the dispatch hook, which fires once per tap rather than per
+                    // frame, so a host redesign that starts carrying a tweet is still reported.
                     DiagLog.flushNow()
-                }.onFailure { DiagLog.line("${ProbeMarkers.PROBE_ERROR} rows failed: $it") }
+                }.onFailure { DiagLog.line("${ProbeMarkers.PROBE_ERROR} state-ctor failed: $it") }
             }
         })
     }
-
-    /**
-     * Checks the returned list tolerates an append, leaving it exactly as found.
-     *
-     * Uses the first element itself rather than a constructed instance: constructing a host row is
-     * the real build's job, and doing it here would test the module's constructor guess instead of
-     * the list's mutability. Removes by index so an `equals`-based remove cannot delete a genuine
-     * duplicate row.
-     */
-    @Suppress("UNCHECKED_CAST")
-    private fun probeMutability(rows: java.util.ArrayList<*>): Boolean = runCatching {
-        val first = rows.firstOrNull() ?: return false
-        val list = rows as java.util.ArrayList<Any>
-        list.add(first)
-        list.removeAt(list.size - 1)
-        true
-    }.getOrDefault(false)
 
     /** Records a dispatched tap and which row it carried. */
     private fun hookDispatch(point: HostResolver.DispatchPoint) {
@@ -237,6 +247,23 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
      *
      * Runs the production [TweetMedia] extractor on whatever it finds, deliberately. A probe-local
      * reimplementation could report media the shipping path cannot actually reach.
+     *
+     * ## The search itself is off the UI thread (1.53)
+     *
+     * Roots are collected on the hook's own thread -- they are field reads on objects the hook
+     * already holds -- and everything from [TweetSearch.find] onwards runs on a background thread.
+     *
+     * The walk is not cheap and it is not expected to hit. On the 20260829 log it ran 4 times per
+     * share for 1,600-1,700 node visits each and reported `media extracted: 0 item(s)` every time,
+     * because the live share path carries a status URL rather than a tweet (1.6.0 established that)
+     * and [MediaSpy] supplies the media instead. Two of those runs land between the tap and the
+     * download starting: ~520 ms of the 2.6 s the user waits, spent on a question whose answer has
+     * not changed in three releases.
+     *
+     * Deleting it would be the cheaper edit and the wrong one -- the reason it is still installed is
+     * that a host redesign which *starts* carrying a tweet must show up in the log rather than
+     * silently making the status path the only thing that works. Moving it off the interaction
+     * thread keeps that report and stops charging the user for it.
      */
     private fun findTweetFrom(where: String, holder: Any?) {
         if (holder == null) {
@@ -271,6 +298,20 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
             )
         }
 
+        offThread("xvc-tweet-search") { searchAndReport(where, holder, roots) }
+    }
+
+    /**
+     * The expensive half of [findTweetFrom]: walk, report, and sweep on a miss.
+     *
+     * Separated so the walk has no way back onto the caller's thread, and so a test can drive it
+     * directly without a thread in the way.
+     */
+    internal fun searchAndReport(
+        where: String,
+        holder: Any,
+        roots: List<Pair<String, Any?>>,
+    ) {
         val outcome = TweetSearch.find(roots)
 
         if (outcome.candidates.isEmpty()) {
@@ -291,6 +332,7 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
             }
             dumpFields(holder)
             deepSweep(where, roots)
+            DiagLog.flushNow()
             return
         }
 
@@ -304,6 +346,7 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
             DiagLog.line("${ProbeMarkers.CANDIDATE_PATH}$n] depth=${c.depth} ${c.value.javaClass.name} @ ${c.path}")
             reportTweet("$where[$n]", c.value)
         }
+        DiagLog.flushNow()
     }
 
     /** Reports a located tweet and what the production extractor makes of it. */
@@ -396,43 +439,60 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
      * a trade worth making.
      */
     private fun deepSweep(where: String, roots: List<Pair<String, Any?>>) {
+        offThread("xvc-deep-sweep") {
+            val outcome = TweetSearch.find(roots, SWEEP_VISITS, SWEEP_DEPTH)
+            if (outcome.candidates.isEmpty()) {
+                DiagLog.line(
+                    "${ProbeMarkers.SWEEP} $where ${ProbeMarkers.SWEEP_ABSENT} " +
+                        "(visits=${outcome.visits} exhausted=${outcome.exhausted} " +
+                        "depth<=$SWEEP_DEPTH)",
+                )
+                // An exhausted sweep means even this budget was not enough, and the verdict is
+                // still unknown. Saying so explicitly, because the surrounding line reads like
+                // an absence proof and on 20260804 that misreading cost a release.
+                if (outcome.exhausted) {
+                    DiagLog.line(
+                        "${ProbeMarkers.SWEEP} $where budget hit, absence NOT proven",
+                    )
+                }
+                return@offThread
+            }
+            DiagLog.line(
+                "${ProbeMarkers.SWEEP} $where ${ProbeMarkers.SWEEP_FOUND} " +
+                    "(${outcome.candidates.size} candidate(s) visits=${outcome.visits})",
+            )
+            // The path is the deliverable: it is the route a targeted lookup would take, which
+            // is what replaces searching once this answers.
+            for ((n, c) in outcome.candidates.withIndex()) {
+                DiagLog.line(
+                    "${ProbeMarkers.SWEEP}   [$n] depth=${c.depth} ${c.value.javaClass.name}",
+                )
+                DiagLog.line("${ProbeMarkers.SWEEP}       path=${c.path}")
+            }
+        }
+    }
+
+    /**
+     * Runs [body] on a low-priority daemon thread, swallowing and logging any throw.
+     *
+     * One helper for both graph walks, because they need identical treatment for identical reasons:
+     * neither may delay a host interaction, and neither may crash X. A reflective walk over a live
+     * graph can hit a host object mid-mutation, and crashing someone's X client to satisfy a
+     * diagnostic is not a trade worth making.
+     *
+     * `MIN_PRIORITY` so this never wins a scheduling contest against X's rendering, and daemon so a
+     * walk in progress cannot hold up process teardown.
+     */
+    private fun offThread(name: String, body: () -> Unit) {
         Thread {
             try {
-                val outcome = TweetSearch.find(roots, SWEEP_VISITS, SWEEP_DEPTH)
-                if (outcome.candidates.isEmpty()) {
-                    DiagLog.line(
-                        "${ProbeMarkers.SWEEP} $where ${ProbeMarkers.SWEEP_ABSENT} " +
-                            "(visits=${outcome.visits} exhausted=${outcome.exhausted} " +
-                            "depth<=$SWEEP_DEPTH)",
-                    )
-                    // An exhausted sweep means even this budget was not enough, and the verdict is
-                    // still unknown. Saying so explicitly, because the surrounding line reads like
-                    // an absence proof and on 20260804 that misreading cost a release.
-                    if (outcome.exhausted) {
-                        DiagLog.line(
-                            "${ProbeMarkers.SWEEP} $where budget hit, absence NOT proven",
-                        )
-                    }
-                    return@Thread
-                }
-                DiagLog.line(
-                    "${ProbeMarkers.SWEEP} $where ${ProbeMarkers.SWEEP_FOUND} " +
-                        "(${outcome.candidates.size} candidate(s) visits=${outcome.visits})",
-                )
-                // The path is the deliverable: it is the route a targeted lookup would take, which
-                // is what replaces searching once this answers.
-                for ((n, c) in outcome.candidates.withIndex()) {
-                    DiagLog.line(
-                        "${ProbeMarkers.SWEEP}   [$n] depth=${c.depth} ${c.value.javaClass.name}",
-                    )
-                    DiagLog.line("${ProbeMarkers.SWEEP}       path=${c.path}")
-                }
+                body()
             } catch (t: Throwable) {
-                DiagLog.line("${ProbeMarkers.SWEEP} $where failed: ${t.javaClass.simpleName}")
+                DiagLog.line("${ProbeMarkers.PROBE_ERROR} $name failed: ${t.javaClass.simpleName}")
             }
+            DiagLog.flushNow()
         }.apply {
-            name = "xvc-deep-sweep"
-            // Below the UI thread: this must never win a scheduling contest against X's rendering.
+            this.name = name
             priority = Thread.MIN_PRIORITY
             isDaemon = true
         }.start()

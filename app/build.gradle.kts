@@ -13,8 +13,8 @@ android {
         // exercised — the module only ever runs inside that process.
         minSdk = 28
         targetSdk = 35
-        versionCode = 29
-        versionName = "1.19.0"
+        versionCode = 73
+        versionName = "1.55.0"
     }
 
     buildFeatures { buildConfig = true }
@@ -88,4 +88,8 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.12.2")
     testImplementation("androidx.test:core:1.5.0")
+    // Deliberately NO testImplementation of the Xposed API. HostLogTest asserts XposedBridge cannot be
+    // resolved in a unit test -- that unresolvability is what makes its fallback-logging assertions
+    // mean anything -- so putting the API on the test classpath fails it. ModuleIconWiringTest checks
+    // the module's interfaces by reading the compiled class bytes instead of naming the types.
 }

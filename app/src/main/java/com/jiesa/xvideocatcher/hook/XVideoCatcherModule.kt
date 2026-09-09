@@ -4,9 +4,12 @@ import android.app.Application
 import android.content.Context
 import com.jiesa.xvideocatcher.BuildConfig
 import com.jiesa.xvideocatcher.DiagLog
+import com.jiesa.xvideocatcher.HostLog
+import com.jiesa.xvideocatcher.DiagSink
+import com.jiesa.xvideocatcher.ModuleSettings
 import de.robv.android.xposed.IXposedHookLoadPackage
+import de.robv.android.xposed.IXposedHookZygoteInit
 import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 
@@ -22,7 +25,23 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
  * classloader is fully set up gets a partially initialised view of the app. The same ordering is
  * what makes the diagnostic log possible at all - there is no Context before this point.
  */
-class XVideoCatcherModule : IXposedHookLoadPackage {
+class XVideoCatcherModule : IXposedHookLoadPackage, IXposedHookZygoteInit {
+
+    /**
+     * Publishes the module APK path for [ModuleIcon].
+     *
+     * This is the only place the path is available: Xposed hands it to the zygote callback and nothing
+     * in the host process can derive it afterwards. It is also why the module now implements a second
+     * interface — 1.51 implemented only [IXposedHookLoadPackage], so there was no way to read our own
+     * resources and the injected row's icon lookup went through `PackageManager`, which package
+     * visibility blocks. See [ModuleIcon] for the full reasoning.
+     *
+     * Runs in the zygote, before any host code: keep it to assignment only, no logging (DiagLog has no
+     * host context yet) and nothing that could throw.
+     */
+    override fun initZygote(startupParam: IXposedHookZygoteInit.StartupParam) {
+        ModuleIcon.modulePath = startupParam.modulePath
+    }
 
     companion object {
         /**
@@ -47,7 +66,7 @@ class XVideoCatcherModule : IXposedHookLoadPackage {
             Context::class.java,
             object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    runCatching {
+                    try {
                         // thisObject is the Application; args[0] is its *base* context
                         // (a ContextImpl). Only the Application declares
                         // registerActivityLifecycleCallbacks, so these must stay distinct.
@@ -55,12 +74,12 @@ class XVideoCatcherModule : IXposedHookLoadPackage {
                         val context = param.args[0] as Context
                         appContext = context
                         install(lpparam.classLoader, context, application)
-                    }.onFailure {
+                    } catch (t: Throwable) {
                         // Never let a module failure surface as a host crash. A missing entry is
                         // recoverable by the user; X dying on launch is not.
-                        DiagLog.line("FATAL install failed: $it")
-                        DiagLog.flushNow()
-                        XposedBridge.log("XVC: install failed: $it")
+                        // Catches Throwable not Exception: compileOnly Xposed classes throw
+                        // NoClassDefFoundError (an Error) if LSPosed fails to inject them.
+                        HostLog.log("install failed: $t")
                     }
                 }
             },
@@ -72,10 +91,23 @@ class XVideoCatcherModule : IXposedHookLoadPackage {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
         }.getOrNull()
 
-        // Bind the log before installing hooks, so a failure inside installation is itself logged.
+        // Bind the diag switch to the user's stored preference instead of sampling it once. X's
+        // process outlives the settings screen by hours, so a value read here and cached would make
+        // turning the switch *off* have no visible effect until a force-stop — which is exactly what
+        // 1.53 and earlier did. See DiagLog.bindEnabledSource.
         DiagLog.setSessionTag(hostVersion ?: "unknown")
+        DiagLog.bindEnabledSource { ModuleSettings.readDiagEnabledFromHost() }
         DiagLog.bindContext(context)
         DiagLog.line("=== module attached ===")
+        DiagLog.line("diag enabled=${DiagLog.isEnabled()}")
+        DiagLog.line("dataDir=${context.applicationInfo.dataDir}")
+        DiagLog.line("extDir=${android.os.Environment.getExternalStorageDirectory()?.absolutePath}")
+        // Both retrieval locations, named at attach time. If Download/ turns out to be
+        // permission-blocked in this host, this is the path that still has the file.
+        DiagLog.line("log fallback: ${DiagSink.appExternalPath(context)}")
+        DiagLog.flushNow()
+
+        HostLog.log("DEBUG: module attached, diag=${DiagLog.isEnabled()}, dataDir=${context.applicationInfo.dataDir}")
         // Start foreground tracking before any share hook can fire. The tweet detail screen resumes
         // long before the sheet opens, so a tracker installed at share time would have missed the
         // event that identifies it.
@@ -105,10 +137,18 @@ class XVideoCatcherModule : IXposedHookLoadPackage {
         val strings = ModuleStrings()
         ShareSheetInjector(classLoader, HostDownloader(strings), strings).install()
 
-        // The Compose share sheet probe stays installed. It covers a different sheet, it is the only
-        // thing that would report a host redesign of that path, and its lines are prefixed
-        // separately from the injector's. Removing it would trade live diagnostics for nothing.
-        SharePathProbe(classLoader).install()
+        // The Compose share sheet probe. Gated on diag: it is a diagnostic, and its cost is not
+        // small. On the 20260829 device log it produced 57% of all lines and 46,768 reflective node
+        // visits across 352 graph searches -- every one of which extracted 0 media items, because
+        // MediaSpy already supplies the URL and the graph search is a leftover from 1.5-1.10. That
+        // work landed on the sheet's own construction path, 13 times per open, which is the lag the
+        // user could see. With diag off the hooks are never installed at all, so the cost is zero
+        // rather than merely unlogged: DiagLog.line() returning early still leaves the reflection.
+        if (DiagLog.isEnabled()) {
+            SharePathProbe(classLoader).install()
+        } else {
+            HostLog.log("probe: not installed (diag off)")
+        }
 
         // Flush now so the file exists, and proves attachment, before the user touches anything.
         // Without this the log only appears after the first share sheet, and an absent file is
@@ -116,8 +156,7 @@ class XVideoCatcherModule : IXposedHookLoadPackage {
         DiagLog.line("log path: ${DiagLog.path()}")
         DiagLog.flushNow()
 
-        XposedBridge.log(
-            "XVC: installed in host $hostVersion (anchors from ${HostClasses.VERIFIED_HOST_VERSION})"
+        HostLog.log("installed in host $hostVersion (anchors from ${HostClasses.VERIFIED_HOST_VERSION})"
         )
     }
 }

@@ -28,6 +28,8 @@ class SharePathProbeTest {
     fun captureLog() {
         DiagLog.resetForTest()
         lines.clear()
+        // Production default is off; tests that assert log lines must enable explicitly.
+        DiagLog.setEnabled(true)
         // bindForTest is required: until a destination is bound DiagLog queues rather than writing,
         // which is its documented contract. Without this the writer seam never sees anything.
         DiagLog.bindForTest()

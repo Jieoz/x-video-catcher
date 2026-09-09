@@ -79,6 +79,64 @@ internal object HostRow {
     }
 
     /**
+     * Build an **additional** row: the module's own label and launcher icon, on a `(package,
+     * activity)` identity borrowed from an installed app that is not already on the sheet.
+     *
+     * ## Why the identity is borrowed rather than the module's own
+     *
+     * A row the sheet will render needs a real, resolvable component — 1.16 proved that inventing
+     * `com.jiesa.xvideocatcher/…Download` is dropped exactly like inventing a package — and Compose
+     * keys on that pair, so it also has to be unique in the list (1.15 crashed the host process
+     * without that). The module could satisfy both by declaring an `ACTION_SEND` intent-filter and
+     * using itself, but that puts a module entry in the *system* share sheet, which is not the
+     * behaviour this module is for. Borrowing a free identity keeps the platform surface untouched.
+     *
+     * The identity is never acted on: [ShareSheetInjector] claims the tap by label and swallows the
+     * host's dispatch, so the borrowed app is never launched.
+     *
+     * ## The icon
+     *
+     * Loaded from the module APK by [ModuleIcon], not via `PackageManager`. 1.51 used
+     * `pm.getApplicationIcon(MODULE_PACKAGE)` and it failed on every attempt in the field: the module
+     * declares no launcher activity or intent filter, so under API 30+ package visibility it is simply
+     * invisible to the host and the lookup throws. The row then fell back to the borrowed app's icon,
+     * which is how a row labelled 下载媒体 ended up wearing a Bluetooth glyph. See [ModuleIcon].
+     *
+     * The icon is written into the row's icon field. On 12.20.5 that field is declared
+     * `java.lang.Object` (device log: `shape a [String,String,String, Object,boolean]`), which is why
+     * [constructCopy] falls back to "the one reference field that is not a String" instead of looking
+     * for a `Drawable`-typed field.
+     *
+     * Falls back to the borrowed app's icon when the module icon cannot be loaded: a row with the
+     * wrong icon is still usable, a row that failed to build is not.
+     */
+    fun appendRowForSheet(
+        template: Any,
+        label: String,
+        existingRows: List<*>,
+        context: Context,
+    ): Any? {
+        val pm = context.packageManager
+        val occupied = occupiedKeys(existingRows)
+        val identity = freeShareTarget(pm, occupied)
+            ?: run {
+                DiagLog.line("INJECT no free ResolveInfo (occupied=${occupied.size})")
+                return null
+            }
+        val moduleIcon = ModuleIcon.load()
+        if (moduleIcon == null) {
+            DiagLog.line("INJECT module icon unavailable; using borrowed identity icon")
+        }
+        return constructCopy(
+            template = template,
+            label = label,
+            packageName = identity.packageName,
+            activityName = identity.activityName,
+            icon = moduleIcon ?: identity.icon,
+        )
+    }
+
+    /**
      * Build a row that **keeps** [template]'s package / activity / icon and only rewrites the
      * label. Used by the 1.18 replace path: the sheet already accepted this identity, so the UI
      * will render it; inventing a 13th identity (1.14–1.17) was always filtered after `row added`.
@@ -140,7 +198,26 @@ internal object HostRow {
     internal fun freeShareTarget(
         pm: PackageManager,
         occupied: Set<Pair<String, String>>,
-    ): ShareIdentity? {
+    ): ShareIdentity? = pickFree(shareCandidates(pm), occupied)
+
+    /**
+     * Every `ACTION_SEND` activity on the device, resolved **once** per process.
+     *
+     * `queryIntentActivities` is a binder round-trip to `PackageManagerService`, and each surviving
+     * candidate then costs a `loadIcon` -- which for an app whose icon is not already in the icon
+     * cache reads and parses a drawable out of its APK. On the 20260829 device log the share sheet
+     * state was constructed 13 times for a single sheet open (search-field recomposition, animation
+     * frames, and the coroutine that fills the row list all produce a new state), so an uncached
+     * lookup pays that whole bill 13 times over while the user watches the sheet.
+     *
+     * Safe to cache for the process lifetime: the result is only used to borrow a `(package,
+     * activity)` pair that Compose will accept as a distinct key. If the user installs or removes an
+     * app mid-session the cached pair is still a real, resolvable component -- and if it is not, the
+     * row still renders, because the identity is never launched. [ShareSheetInjector] claims the tap
+     * by label and swallows the host's dispatch.
+     */
+    private fun shareCandidates(pm: PackageManager): List<ShareIdentity> {
+        cachedCandidates?.let { return it }
         val candidates = mutableListOf<ShareIdentity>()
         val seen = mutableSetOf<Pair<String, String>>()
         for (mime in SHARE_MIMES) {
@@ -161,8 +238,12 @@ internal object HostRow {
                 candidates += ShareIdentity(pkg, act, icon)
             }
         }
-        return pickFree(candidates, occupied)
+        cachedCandidates = candidates
+        return candidates
     }
+
+    @Volatile
+    private var cachedCandidates: List<ShareIdentity>? = null
 
     data class ShareIdentity(
         val packageName: String,
@@ -218,7 +299,17 @@ internal object HostRow {
         val labelField = labelFieldOf(template, fields) ?: return null
         val packageField = packageFieldOf(template, fields, labelField)
         val activityField = activityFieldOf(template, fields, labelField)
-        val iconField = fields.firstOrNull { it.type.name == DRAWABLE || Drawable::class.java.isAssignableFrom(it.type) }
+        // Legacy rows have one non-String reference (the icon). X 12.24 adds a second reference:
+        // metadata whose verified field shape is [boolean,String,int]. Exclude that metadata type so
+        // the icon remains unambiguous; every other constructor value, including the metadata object,
+        // is copied from the host template unchanged below.
+        val iconField = fields.firstOrNull {
+            it.type.name == DRAWABLE || Drawable::class.java.isAssignableFrom(it.type)
+        } ?: fields.singleOrNull {
+            it.type != String::class.java &&
+                !it.type.isPrimitive &&
+                !HostResolver.isRowMetadataShape(it.type)
+        }
 
         val ctor = matchingConstructor(cls, fields) ?: return null
         val args = Array(fields.size) { i ->

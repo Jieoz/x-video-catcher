@@ -35,6 +35,46 @@ class HostRowTest {
         assertEquals("com.whatsapp.contact.ui.picker.ExternalShareAlias", row.activityName)
     }
 
+    @Suppress("unused")
+    private class Metadata(
+        val enabled: Boolean,
+        val key: String,
+        val rank: Int,
+    )
+
+    @Suppress("unused")
+    private class MetadataRow(
+        val packageName: String,
+        val activityName: String,
+        val label: String,
+        val icon: Any?,
+        val metadata: Metadata,
+    )
+
+    @Test
+    fun `12_24 copy rewrites icon but preserves metadata by identity`() {
+        val metadata = Metadata(true, "verified-host-value", 7)
+        val template = MetadataRow(
+            "com.whatsapp",
+            "com.whatsapp.A",
+            "WhatsApp",
+            Any(),
+            metadata,
+        )
+        val replacementIcon = ColorDrawable(0xFF00FF00.toInt())
+        val copy = HostRow.constructWithIdentity(
+            template,
+            "下载媒体",
+            HostRow.ShareIdentity("com.discord", "com.discord.Share", replacementIcon),
+        ) as MetadataRow
+
+        assertEquals("com.discord", copy.packageName)
+        assertEquals("com.discord.Share", copy.activityName)
+        assertEquals("下载媒体", copy.label)
+        assertTrue(copy.icon === replacementIcon)
+        assertTrue(copy.metadata === metadata)
+    }
+
     @Test
     fun `occupiedKeys reads package and activity from live-shaped rows`() {
         val rows = listOf(

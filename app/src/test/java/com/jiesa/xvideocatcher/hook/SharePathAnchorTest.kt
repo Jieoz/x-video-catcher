@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -38,6 +39,25 @@ import org.junit.Test
 class SharePathAnchorTest {
 
     private val loader = javaClass.classLoader!!
+
+    /**
+     * Seeds the class census the resolvers now search.
+     *
+     * Resolution stopped enumerating `pkg.a`, `pkg.b`, ... inside one recorded package and now filters
+     * [HostDex]'s list of every class the host declares. That is what lets an anchor survive X moving
+     * a package, but [HostDex] reads the dex files through `BaseDexClassLoader`, which a JVM unit test
+     * does not have -- so on this JVM the census is empty, every resolver sees an empty search space,
+     * and each anchor test fails with an NPE that says nothing about the predicate under test.
+     *
+     * Seeding the fixture names supplies the census a device provides for real. Nested names are listed
+     * explicitly because the action model is a nested class (`t$g`) and dex enumeration reports nested
+     * classes as ordinary entries, which a package-walk in this test would not.
+     */
+    @Before
+    fun seedCensus() {
+        HostDex.resetForTest()
+        HostDex.seedForTest(FIXTURES)
+    }
 
     // ---- row model --------------------------------------------------------
 
@@ -100,81 +120,6 @@ class SharePathAnchorTest {
         // more than one and refuse. This asserts the whole gate end to end.
         val cls = HostResolver.rowClass(loader)
         assertEquals("com.x.models.share.a", cls!!.name)
-    }
-
-    // ---- row provider -----------------------------------------------------
-
-    @Test
-    fun `row provider resolves to the string to arraylist method`() {
-        val m = HostResolver.rowProvider(loader)
-        assertNotNull("provider must resolve", m)
-        assertEquals("com.x.share.impl.c", m!!.declaringClass.name)
-        assertEquals("buildTargets", m.name)
-        assertEquals(ArrayList::class.java, m.returnType)
-    }
-
-    @Test
-    fun `provider without a context or package manager is rejected`() {
-        // Decoy d: (String) -> ArrayList and nothing else. That signature alone is generic — any
-        // parser matches it.
-        assertProviderRejects("com.x.share.impl.d")
-    }
-
-    @Test
-    fun `provider holding a context but no package manager is rejected`() {
-        // Decoy f: Context field, no PackageManager getter. Isolates the PackageManager clause;
-        // ablation showed it was a no-op while decoy d was the only fixture, since d fails both
-        // clauses at once and either surviving clause still rejected it.
-        assertProviderRejects("com.x.share.impl.f")
-    }
-
-    @Test
-    fun `provider exposing a package manager but holding no context is rejected`() {
-        // Decoy g: the mirror of f — PackageManager getter, no Context field. Isolates the Context
-        // clause, which ablation exposed for the same reason.
-        assertProviderRejects("com.x.share.impl.g")
-    }
-
-    @Test
-    fun `provider returning an immutable list is rejected`() {
-        // Decoy e: Context and PackageManager present, returns List. Appending to an unmodifiable
-        // view throws inside X's UI thread, so the concrete return type is a correctness requirement.
-        assertProviderRejects("com.x.share.impl.e")
-    }
-
-    /**
-     * Asserts the provider predicate refuses [className] specifically.
-     *
-     * Checks the named class is *not* what resolved, rather than only that resolution stayed unique.
-     * The weaker form passes whenever exactly one class matches, whichever one it is, which is how
-     * two of these clauses first went green while asserting nothing.
-     */
-    private fun assertProviderRejects(className: String) {
-        val m = HostResolver.rowProvider(loader)
-        assertNotNull("provider must still resolve", m)
-        assertTrue(
-            "$className must be rejected, but resolution picked ${m!!.declaringClass.name}.${m.name}",
-            m.declaringClass.name != className,
-        )
-        assertEquals("com.x.share.impl.c", m.declaringClass.name)
-    }
-
-    @Test
-    fun `resolved provider really returns a mutable list of rows`() {
-        // Runs the resolved method rather than trusting its signature: the real build appends here,
-        // so "resolves" is not the claim that matters — "resolves to something appendable" is.
-        val m = HostResolver.rowProvider(loader)!!
-        val provider = com.x.share.impl.c(null)
-        @Suppress("UNCHECKED_CAST")
-        val rows = m.invoke(provider, "video/mp4") as ArrayList<Any>
-        assertEquals(2, rows.size)
-
-        val row = HostResolver.rowClass(loader)!!
-        assertTrue("provider must return row-typed elements", row.isInstance(rows[0]))
-
-        val before = rows.size
-        rows.add(rows[0])
-        assertEquals("list must accept an append", before + 1, rows.size)
     }
 
     // ---- action model -----------------------------------------------------
@@ -326,45 +271,6 @@ class SharePathAnchorTest {
         assertEquals("handled", controller.state)
     }
 
-    // ---- sheet open -------------------------------------------------------
-
-    @Test
-    fun `sheet open resolves the compose attach point`() {
-        val m = HostResolver.sheetOpen(loader)
-        assertNotNull("sheet-open anchor must resolve", m)
-        assertEquals("com.twitter.share.chooser.j", m!!.declaringClass.name)
-        assertEquals("showSheet", m.name)
-        assertEquals(Boolean::class.javaPrimitiveType, m.returnType)
-    }
-
-    @Test
-    fun `sheet open rejects a class without a compose view`() {
-        // Decoy chooser.k: an Activity field and a (X) -> boolean method, but no ComposeView.
-        // "(X) -> boolean on something holding an Activity" is a shape ordinary launchers and
-        // permission helpers match.
-        assertSheetOpenRejects("com.twitter.share.chooser.k")
-    }
-
-    @Test
-    fun `sheet open rejects a compose class holding no activity`() {
-        // Decoy chooser.m: a genuine ComposeView, no Activity. Isolates the Activity clause, which
-        // ablation exposed as a no-op — decoy k lacks both, so the ComposeView clause alone rejected
-        // it and deleting the Activity check changed nothing. The sheet attaches to the Activity's
-        // decor view, so that field is what makes this the attach point rather than any Compose host.
-        assertSheetOpenRejects("com.twitter.share.chooser.m")
-    }
-
-    /** Asserts the sheet-open predicate refuses [className] specifically, not merely that it is unique. */
-    private fun assertSheetOpenRejects(className: String) {
-        val m = HostResolver.sheetOpen(loader)
-        assertNotNull("sheet-open anchor must still resolve", m)
-        assertTrue(
-            "$className must be rejected, but resolution picked ${m!!.declaringClass.name}",
-            m.declaringClass.name != className,
-        )
-        assertEquals("com.twitter.share.chooser.j", m.declaringClass.name)
-    }
-
     // ---- tweet lookup -----------------------------------------------------
     //
     // Still production code: the probe reads the shared tweet off the sheet-open argument through
@@ -405,5 +311,33 @@ class SharePathAnchorTest {
         val row = HostResolver.rowClass(loader)!!
         val action = HostResolver.actionClass(loader, row)!!
         return HostResolver.dispatchPoints(loader, action.superclass!!)
+    }
+
+    private companion object {
+        /** Every share-related fixture, standing in for what dex enumeration reports on a device. */
+        val FIXTURES = listOf(
+            "com.x.models.share.a",
+            "com.x.models.share.b",
+            "com.x.models.share.c",
+            "com.x.models.share.d",
+            "com.x.models.share.e",
+            "com.x.share.impl.b",
+            "com.x.share.impl.c",
+            "com.x.share.impl.d",
+            "com.x.share.impl.e",
+            "com.x.share.impl.f",
+            "com.x.share.impl.g",
+            "com.x.share.impl.h",
+            "com.x.dms.components.sharesheet.j",
+            "com.x.dms.components.sharesheet.q",
+            "com.x.dms.components.sharesheet.r",
+            "com.x.dms.components.sharesheet.t",
+            "com.x.dms.components.sharesheet.t${'$'}a",
+            "com.x.dms.components.sharesheet.t${'$'}f",
+            "com.x.dms.components.sharesheet.t${'$'}g",
+            "com.twitter.share.api.e",
+            "com.twitter.share.api.m",
+            "com.twitter.share.api.n",
+        )
     }
 }

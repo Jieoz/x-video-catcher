@@ -72,21 +72,29 @@ internal object HostClasses {
      */
     const val VIDEO_VARIANT = "com.twitter.media.av.model.a0"
 
-    // ---- Compose share sheet (the live one) --------------------------------
+    // ---- Compose share sheet: LOG ANNOTATION ONLY ---------------------------
     //
-    // Packages only. Every class inside is located by shape at runtime, since R8 renames within a
-    // package but does not move classes between packages.
+    // These are not a search space and nothing resolves through them. [HostResolver] searches
+    // [HostDex.classesMatching] over a feature word, so a package rename cannot silence it.
+    //
+    // Why they survive at all: a miss has to distinguish "the shape changed" from "the package
+    // moved", and the only way to say "still where it was on 12.13" is to have written down where
+    // that was. So each constant is passed to `HostResolver.reportMiss` purely to annotate a log
+    // line, and resolution succeeds unchanged when every one of them is wrong — which is asserted
+    // directly, because a constant that is only supposed to be decoration is exactly the kind of
+    // thing that quietly becomes load-bearing again.
+    //
+    // `CHOOSER_PACKAGE = "com.twitter.share.chooser"` is deleted rather than demoted. The 20260828
+    // log reports it `declares no classes on this host`, so it cannot annotate anything, and its one
+    // consumer -- the `sheetOpen` anchor -- was already recorded as confirmed off the live path.
 
-    /** Where the sheet is attached to the window: `chooser.j.J0`. */
-    const val CHOOSER_PACKAGE = "com.twitter.share.chooser"
-
-    /** Where the row list is built from `PackageManager`: `share.impl.c.a`. */
-    const val SHARE_IMPL_PACKAGE = "com.x.share.impl"
-
-    /** Where one row lives: `models.share.a`. */
+    /** Where one row lived on 12.13 and still lives on 12.20.5: `models.share.a`. */
     const val SHARE_ROW_PACKAGE = "com.x.models.share"
 
-    /** Where tap actions and the sheet state live: `sharesheet.t$g`, `sharesheet.r.h`. */
+    /** Where the row list was built on 12.13: `share.impl.c.a`. Gone as a method on 12.20.5. */
+    const val SHARE_IMPL_PACKAGE = "com.x.share.impl"
+
+    /** Where tap actions and the sheet state live: `sharesheet.s`, `sharesheet.y`. */
     const val SHARESHEET_PACKAGE = "com.x.dms.components.sharesheet"
 
     // ---- tweet action sheet (where the download row is injected) ------------

@@ -169,6 +169,7 @@ class CensusGuardTest {
         val captured = mutableListOf<String>()
         val previous = DiagLog.writer
         DiagLog.resetForTest()
+        DiagLog.setEnabled(true)
         DiagLog.writer = { lines -> captured.addAll(lines); true }
         DiagLog.bindForTest()
         try {

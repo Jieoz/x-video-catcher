@@ -1,52 +1,61 @@
 package com.jiesa.xvideocatcher.hook
 
 import com.jiesa.xvideocatcher.DiagLog
+import com.jiesa.xvideocatcher.HostLog
+import com.jiesa.xvideocatcher.ModuleSettings
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
-import java.lang.reflect.Method
+import java.lang.reflect.Constructor
 
 /**
  * Adds a download row to X's live share sheet, and handles taps on it.
  *
- * ## Why this targets `com.x.share.impl` and not the tweet action sheet
+ * ## Why the row provider is gone (1.49)
  *
- * 1.11.0 hooked `com.twitter.tweet.action.legacy.e0`, chosen because cross-referencing found 57
- * classes outside its package calling into the cluster. The device log answered flatly:
+ * 1.43 through 1.48 hooked a *method that returns the row list*: `(String) -> ArrayList` on the class
+ * owning a `PackageManager`, progressively relaxed to three tiers. Four consecutive releases injected
+ * nothing, and the device log said why in a way no relaxation could have fixed:
  *
- *     sheet controller: 0 candidates in com.twitter.tweet.action.legacy
+ *     row provider: 0 strict / 0 loose / 0 any-arg candidates in com.x.share.impl
  *
- * The class is in the APK; it is never instantiated on the user's path. That sheet is a second,
- * unused implementation, and static call sites cannot distinguish "reachable in the call graph"
- * from "on the path the user actually walks" -- a distinction this module had already written down
- * in [HostResolver.sheetOpen]'s comment and then ignored one anchor over.
+ * On 12.20.5 the row-building logic is a `suspend` lambda. The compiler lowered it to an anonymous
+ * `SuspendLambda` whose whole signature is `invokeSuspend(Object) -> Object`, and every tier required
+ * the return type to be a `List`. **Coroutine lowering erases exactly the property the resolver was
+ * anchored on**, so the search could not have succeeded on any host where this code path is a
+ * coroutine, whatever the parameter predicate said.
  *
- * What the same log proved live, every time, is the Compose sheet:
+ * So the module stopped looking for the code that builds the rows and started looking for the object
+ * they land in. The sheet state is a Kotlin data class; a data class cannot be flattened into a
+ * lambda.
  *
- *     PROBE resolve row=com.x.models.share.a
- *     PROBE resolve provider=com.x.share.impl.c.a
- *     PROBE rows built: 12 row(s), arg=https://x.com/i/status/...
- *     PROBE   list mutable=true
+ * ## Where the row is injected
  *
- * So the anchors here are the ones [SharePathProbe] exercised on the device: the row provider that
- * builds the list, and the dispatch points that receive a tap. No new resolver is introduced -- they
- * come from [HostResolver], the same definitions the release gate verifies against a real APK.
+ * Into the sheet **state's constructor**. The state is immutable with a compiled `copy`, so every
+ * instance the host renders is built there no matter which code path produced it — on 12.20.5 four
+ * different writers each read the state flow, copy it and write it back, and the rows arrive on the
+ * first of them. Hooking the component's reducer method instead would see only the states that
+ * method is handed, which on this host never include a row-bearing one. [SheetRows] carries the
+ * reasoning and the surgery; this class is the wiring.
+ *
+ * The state type itself is not searched for. It is [HostResolver.stateClass], derived from the
+ * dispatch points the device already proved live — the class that receives a tap is the class that
+ * declares the sheet's `(S) -> S` state transform, and `S` is the state.
  *
  * ## Where the media comes from
  *
- * Not from a tweet. The provider is handed a **status URL**, and every graph walk the 1.11 probe ran
- * from it reported `media extracted: 0 item(s)` -- there is no tweet object on this path, which is
- * what defeated 1.5 through 1.11.
- *
- * [MediaSpy] supplies it instead, by reading the URL the host's own player already resolved. The
- * host cannot play a video without producing a playable URL, so by the time the user opens the share
- * sheet on a video they were watching, the address is in the process.
+ * Not from a tweet. Every graph walk the 1.11 probe ran from this path reported
+ * `media extracted: 0 item(s)` -- there is no tweet object on it, which is what defeated 1.5 through
+ * 1.11. The status id comes off the share URL the state carries, and [MediaSpy] supplies the rest by
+ * reading the URL the host's own player already resolved.
  *
  * ## How the row is built
  *
- * By **replacing** an existing visible row with a same-identity clone whose label is ours,
- * via [HostRow.relabelOnly]. Appending a 13th row (1.14–1.17) always logged success and never
- * appeared in the UI. The host's row type (`com.x.models.share.a`) is a 5-field value class;
- * a constructor copy keeps every field the sheet already accepted.
+ * By **appending** a new row built from a visible one, via [HostRow.appendRowForSheet]: the module's
+ * label and launcher icon on a `(package, activity)` identity borrowed from an installed app that is
+ * not already on the sheet. 1.18–1.49 instead relabelled a host row in place, which worked but cost
+ * the user that row (X's Telegram entry vanished). Appending failed in 1.14–1.17 because those hooked
+ * the row *provider* and mutated a list the host had already finished with; since 1.49 the hook is on
+ * the state **constructor**, so the longer list is the host's own input. See [SheetRows.substitute].
  *
  * ## Failure policy
  *
@@ -60,13 +69,9 @@ internal class ShareSheetInjector(
 ) {
 
     fun install() {
-        val provider = HostResolver.rowProvider(classLoader)
-        if (provider == null) {
-            DiagLog.line("$MARK row-provider MISS -- no download row this session")
-            DiagLog.flushNow()
-            return
-        }
-
+        // Strict derivation order: every anchor after the first is a consequence of one already
+        // verified, so a miss names the exact link that broke instead of "the sheet moved".
+        //   row model -> action carrying a row -> sealed action root -> dispatch points -> state
         val rowClass = HostResolver.rowClass(classLoader)
         if (rowClass == null) {
             DiagLog.line("$MARK row-class MISS -- cannot build a row")
@@ -74,11 +79,10 @@ internal class ShareSheetInjector(
             return
         }
 
-        // actionClass is the *concrete* row-carrying subtype (t$g). Dispatch methods take the
-        // *sealed parent* (t), not the subtype — Kotlin/JVM erases the sealed hierarchy to the
-        // superclass parameter. SharePathProbe already used `action.superclass` and the 1.12
-        // device log proved it: injector searched `(g)->void` and found nothing, while the probe
-        // on the same process reported `dispatch=2 point(s)` for `impl.b.h` and `sharesheet.j.h`.
+        // actionClass is the *concrete* row-carrying subtype. Dispatch methods take the *sealed
+        // parent*, not the subtype -- Kotlin/JVM erases the sealed hierarchy to the superclass
+        // parameter. The 1.12 device log proved it: the injector searched `(g)->void` and found
+        // nothing while the probe on the same process reported `dispatch=2 point(s)`.
         val action = HostResolver.actionClass(classLoader, rowClass)
         val actionRoot = action?.superclass
         if (action == null || actionRoot == null || actionRoot == Any::class.java) {
@@ -101,18 +105,33 @@ internal class ShareSheetInjector(
             return
         }
 
+        val stateClass = HostResolver.stateClass(dispatch)
+        if (stateClass == null) {
+            DiagLog.line("$MARK state-class MISS -- no download row this session")
+            DiagLog.flushNow()
+            return
+        }
+        val constructors = HostResolver.stateConstructors(stateClass)
+        if (constructors.isEmpty()) {
+            DiagLog.line("$MARK state ${stateClass.name} declares no List-carrying constructor")
+            DiagLog.flushNow()
+            return
+        }
+
         DiagLog.line(
-            "${ProbeMarkers.INJECT_RESOLVE}provider=${provider.declaringClass.name}.${provider.name} "
-                + "row=${rowClass.name} dispatch=${dispatch.size}",
+            "${ProbeMarkers.INJECT_RESOLVE}state=${stateClass.name} ctor=${constructors.size} " +
+                "row=${rowClass.name} dispatch=${dispatch.size}",
         )
 
-        installHook("row-append") { hookRowProvider(provider, rowClass) }
+        for (ctor in constructors) {
+            installHook("state-${ctor.parameterTypes.size}arg") { hookStateBuild(ctor, rowClass) }
+        }
         for (point in dispatch) {
             installHook("tap-${point.method.declaringClass.name}") { hookDispatch(point) }
         }
 
         DiagLog.flushNow()
-        XposedBridge.log("XVC: injector armed on ${provider.declaringClass.name}")
+        HostLog.log("injector armed on ${stateClass.name}")
     }
 
     private fun installHook(name: String, block: () -> Unit) {
@@ -125,108 +144,131 @@ internal class ShareSheetInjector(
     }
 
     /**
-     * Appends the download row to the list the sheet renders from.
+     * Puts the download row into the sheet state as it is being constructed.
      *
-     * `after`, on the provider's return value: the probe proved that list is a mutable `ArrayList`
-     * at this exact point. Appending before it is built would have nothing to append to.
+     * `before`, on the constructor's arguments, rather than `after` on the built object. The state's
+     * fields are final and the host's list may be a persistent one, so the argument is the last point
+     * at which the row list can be changed without writing to a final field or mutating a list that
+     * an earlier state may still be holding. [SheetRows.substitute] carries that reasoning.
      *
-     * The row is only added when [MediaSpy] holds something downloadable, so the entry cannot
-     * promise what the tap would fail to deliver.
+     * Runs on every state build, which on this sheet is once per keystroke in the search field, so it
+     * is written to be cheap and idempotent: it returns immediately when no argument holds rows —
+     * the normal case before the row-loading coroutine finishes — and again when a row already
+     * carries the module's label.
      */
-    private fun hookRowProvider(provider: Method, rowClass: Class<*>) {
-        XposedBridge.hookMethod(provider, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                runCatching {
-                    val rows = param.result as? java.util.ArrayList<*>
-                    if (rows == null) {
-                        DiagLog.line("$MARK provider returned ${param.result?.javaClass?.name}")
-                        return
-                    }
-
-                    // The row is only offered when something is actually downloadable, so a tap
-                    // can never toast "no media" -- that would be worse than no row. Since 1.19
-                    // that means a master playlist: `best()` returns only masters, because the
-                    // `.mp4` this gate used to demand was an init segment with no frames.
-                    val hit = MediaSpy.best()
-                    if (hit == null || hit.kind != MediaSpy.Kind.HLS_MASTER) {
-                        DiagLog.line(
-                            if (hit == null) ProbeMarkers.INJECT_NO_MEDIA
-                            else "$MARK no downloadable capture (best=${hit.kind})",
-                        )
-                        return
-                    }
-
-                    val template = rows.firstOrNull { it != null && rowClass.isInstance(it) }
-                    if (template == null) {
-                        DiagLog.line("$MARK no row template (list size=${rows.size})")
-                        return
-                    }
-
-                    val context = XVideoCatcherModule.appContext
-                    if (context == null) {
-                        DiagLog.line("$MARK no host context, cannot label the row")
-                        return
-                    }
-
-                    val wanted = strings.downloadLabel(context)
-                    // 1.14–1.17 all APPENDED a 13th row. Device always logged `row added` /
-                    // `list size=13` and never showed a button (1.17: real Bluetooth identity,
-                    // still invisible). The sheet only renders the host-built set; a post-hoc
-                    // append is dropped. REPLACE the first visible row in place: same
-                    // package/activity/icon the host already accepted, label only rewritten.
-                    // WhatsApp (or whoever is index 0) is temporarily missing on that sheet —
-                    // acceptable; tap is still claimed by label and host launch is swallowed.
-                    if (HostRow.labelOf(template) == wanted) {
-                        // Already replaced on a prior provider call this open.
-                        return
-                    }
-                    val row = HostRow.relabelOnly(template, wanted)
-                    if (row == null) {
-                        val finals = template.javaClass.declaredFields.count {
-                            !java.lang.reflect.Modifier.isStatic(it.modifiers) &&
-                                java.lang.reflect.Modifier.isFinal(it.modifiers)
-                        }
-                        DiagLog.line(
-                            "$MARK row relabel failed from ${template.javaClass.name} " +
-                                "(finalFields=$finals label=$wanted)",
-                        )
-                        return
-                    }
-
-                    @Suppress("UNCHECKED_CAST")
-                    val list = rows as java.util.ArrayList<Any>
-                    val idx = list.indexOfFirst { it != null && rowClass.isInstance(it) }
-                    if (idx < 0) {
-                        DiagLog.line("$MARK replace MISS (no row slot)")
-                        return
-                    }
-                    list[idx] = row
-                    val shown = runCatching {
-                        val label = HostRow.labelOf(row)
-                        val dotted = row.javaClass.declaredFields
-                            .asSequence()
-                            .filter { it.type == String::class.java }
-                            .mapNotNull { f ->
-                                f.isAccessible = true
-                                f.get(row) as? String
-                            }
-                            .filter { it.contains('.') && !it.contains(' ') }
-                            .toList()
-                        val pkg = dotted.getOrNull(0)
-                        val act = dotted.getOrNull(1)?.substringAfterLast('.') ?: dotted.getOrNull(1)
-                        "$pkg/$act | $label"
-                    }.getOrElse { "?" }
-                    DiagLog.line(
-                        "${ProbeMarkers.INJECT_ROW_ADDED} (REPLACE idx=$idx, ${hit.kind}, " +
-                            "list size=${list.size}, $shown)",
-                    )
-                    DiagLog.flushNow()
-                }.onFailure {
-                    DiagLog.line("$MARK row-append failed: $it")
-                }
+    private fun hookStateBuild(ctor: Constructor<*>, rowClass: Class<*>) {
+        XposedBridge.hookMethod(ctor, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                runCatching { injectInto(param.args, ctor.parameterTypes, rowClass) }
+                    .onFailure { DiagLog.line("$MARK row-inject failed: $it") }
             }
         })
     }
+
+    /**
+     * The body of the state hook, as a plain function over the constructor's arguments.
+     *
+     * Split out so the injection decision is exercisable on the JVM. Six releases shipped injection
+     * logic that could only be observed on the user's device, and each one cost a round trip; this
+     * one is asserted against a 12.20.5-shaped fixture before it ever reaches a phone.
+     */
+    internal fun injectInto(args: Array<Any?>, parameterTypes: Array<Class<*>>, rowClass: Class<*>) {
+        val slot = SheetRows.locate(args, rowClass) ?: return
+
+        val context = XVideoCatcherModule.appContext
+        if (context == null) {
+            DiagLog.line("$MARK no host context, cannot label the row")
+            return
+        }
+        val wanted = strings.downloadLabel(context)
+        // Already ours from an earlier build of this same sheet. Not a miss, so not logged: the
+        // state is rebuilt on every keystroke and a line per keystroke would bury the real ones.
+        if (SheetRows.alreadyCarries(slot.rows, wanted)) return
+
+        // Bind the media *before* offering the row, so the entry cannot promise what a tap would
+        // fail to deliver.
+        val hitKind = bindMedia(args) ?: return
+
+        val template = slot.rows[slot.rowIndex] ?: return
+        // 1.50: append a new row instead of relabelling a host one. See SheetRows.substitute for why
+        // appending renders now (constructor argument) when it did not in 1.14-1.17 (row provider).
+        val row = HostRow.appendRowForSheet(template, wanted, slot.rows, context)
+        if (row == null) {
+            val finals = template.javaClass.declaredFields.count {
+                !java.lang.reflect.Modifier.isStatic(it.modifiers) &&
+                    java.lang.reflect.Modifier.isFinal(it.modifiers)
+            }
+            DiagLog.line(
+                "$MARK row build failed from ${template.javaClass.name} " +
+                    "(finalFields=$finals label=$wanted)",
+            )
+            return
+        }
+
+        if (!SheetRows.substitute(args, parameterTypes, slot, row, insertAt = 0)) {
+            DiagLog.line(
+                "$MARK substitute refused: arg ${slot.argIndex} is " +
+                    "${parameterTypes.getOrNull(slot.argIndex)?.name} holding " +
+                    "${slot.rows.javaClass.name}; row skipped",
+            )
+            return
+        }
+        DiagLog.line(
+            "${ProbeMarkers.INJECT_ROW_ADDED} (APPEND arg=${slot.argIndex} at=0, " +
+                "$hitKind, list size=${slot.rows.size}->${slot.rows.size + 1}, ${describe(row)})",
+        )
+        DiagLog.flushNow()
+    }
+
+    /**
+     * Binds what a tap on the row would download, and names the evidence it was bound from.
+     *
+     * Returns null when nothing is downloadable, which suppresses the row.
+     */
+    private fun bindMedia(args: Array<Any?>): String? {
+        val statusId = SheetRows.statusIdIn(args)
+        if (statusId != null) {
+            // 1.24: freeze the STATUS, not MediaSpy.best. Device 1.23 showed FREEZE binding
+            // neighbouring timeline photos/videos while HARVEST returned photos=0 -- capture
+            // recency cannot name "this" status.
+            DownloaderState.freezeStatus(statusId, MediaSpy.focusedPhotoKey())
+            DiagLog.line("$MARK FREEZE status=$statusId photoKey=${DownloaderState.frozenPhotoKey}")
+            // With a status id the row is offered unconditionally: resolution happens on tap via
+            // StatusMedia.
+            return "STATUS"
+        }
+        // No status URL on the state: last-resort capture freeze so a row can still appear on odd
+        // hosts. Logged so a regression is greppable.
+        CaptureHarvest.recordPhotosFrom(*args)
+        val live = MediaSpy.best(null)
+        if (live.isEmpty()) {
+            DiagLog.line(ProbeMarkers.INJECT_NO_MEDIA)
+            return null
+        }
+        DownloaderState.freeze(live)
+        DiagLog.line(
+            "$MARK FREEZE capture-fallback n=${live.size} kind=${live.first().kind} " +
+                live.first().url.take(80),
+        )
+        return DownloaderState.targetHits(null).firstOrNull()?.kind?.name ?: run {
+            DiagLog.line(ProbeMarkers.INJECT_NO_MEDIA)
+            null
+        }
+    }
+
+    /** A built row as `package/activity | label`, for the one line that says injection happened. */
+    private fun describe(row: Any): String = runCatching {
+        val dotted = row.javaClass.declaredFields
+            .asSequence()
+            .filter { it.type == String::class.java }
+            .mapNotNull { f ->
+                f.isAccessible = true
+                f.get(row) as? String
+            }
+            .filter { it.contains('.') && !it.contains(' ') }
+            .toList()
+        "${dotted.getOrNull(0)}/${dotted.getOrNull(1)?.substringAfterLast('.')} | ${HostRow.labelOf(row)}"
+    }.getOrElse { "?" }
 
     /**
      * Claims a tap on the injected row.
@@ -249,6 +291,15 @@ internal class ShareSheetInjector(
                     if (!isOurs(action, context)) return
 
                     DiagLog.line(ProbeMarkers.INJECT_TAP)
+                    // Harvest only feeds MediaSpy, which `downloadCaptured` consults only when no
+                    // status id was frozen. With one bound this walked ~400 nodes over the live
+                    // sheet graph to fill a cache nothing would read: every share on the 20260829
+                    // log logged `HARVEST photos=0` and then resolved via the status anyway. Asking
+                    // the same question the downloader is about to ask keeps the walk for the odd
+                    // hosts that need it and takes it off the taps that do not.
+                    if (DownloaderState.activeTweetId.isNullOrEmpty()) {
+                        CaptureHarvest.recordPhotosFrom(param.thisObject, *param.args)
+                    }
                     // Swallow the host's handling: it has no branch for a row it did not build.
                     param.result = null
                     downloader.downloadCaptured(context)
@@ -275,6 +326,25 @@ internal class ShareSheetInjector(
                 HostRow.labelOf(v) == wanted
             }
         }.getOrDefault(false)
+    }
+
+    /**
+     * Whether [list] actually accepts writes.
+     *
+     * `Collections.unmodifiableList` and `List.of` both present as `MutableList` after erasure and
+     * throw `UnsupportedOperationException` only when written to. Probing costs one add/remove of a
+     * value already in the list, which leaves it byte-identical, and is far cheaper than an exception
+     * escaping into the host's UI thread.
+     */
+    private fun isWritable(list: MutableList<*>): Boolean {
+        if (list is java.util.ArrayList<*>) return true
+        @Suppress("UNCHECKED_CAST")
+        val probe = list as MutableList<Any?>
+        return runCatching {
+            probe.add(null)
+            probe.removeAt(probe.size - 1)
+            true
+        }.getOrElse { false }
     }
 
     private companion object {

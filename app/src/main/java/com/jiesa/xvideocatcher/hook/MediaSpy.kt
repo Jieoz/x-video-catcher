@@ -113,6 +113,40 @@ internal object MediaSpy {
             DiagLog.line("$MARK hook failed on ${spec.name}: $it")
         }
         DiagLog.flushNow()
+        installOkHttp(classLoader)
+    }
+
+    private fun installOkHttp(classLoader: ClassLoader) {
+        val reqBuilder = runCatching {
+            classLoader.loadClass("okhttp3.Request\$Builder")
+        }.getOrNull()
+        if (reqBuilder == null) {
+            DiagLog.line("$MARK Request.Builder MISS")
+            return
+        }
+
+        val buildMethod = reqBuilder.declaredMethods.firstOrNull {
+            it.name == "build" && it.parameterTypes.isEmpty()
+        } ?: return
+
+        runCatching {
+            de.robv.android.xposed.XposedBridge.hookMethod(buildMethod, object : de.robv.android.xposed.XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    runCatching {
+                        val req = param.result ?: return
+                        val urlMethod = req.javaClass.getMethod("url")
+                        val httpUrl = urlMethod.invoke(req) ?: return
+                        val urlStr = httpUrl.toString()
+                        if (MediaUrls.isPhoto(urlStr)) {
+                            record(urlStr)
+                        }
+                    }
+                }
+            })
+            DiagLog.line("$MARK armed on Request.Builder.build")
+        }.onFailure {
+            DiagLog.line("$MARK OkHttp hook failed: $it")
+        }
     }
 
     /**
@@ -148,14 +182,127 @@ internal object MediaSpy {
      * Deduplicated by URL: HLS playback re-opens the same playlist repeatedly, and without this one
      * video's requests would evict everything else from the cap.
      */
+    /**
+     * Records a photo URL discovered outside the OkHttp/DataSpec hooks (share-sheet harvest).
+     * Same path as a network capture so [best] does not care where it came from.
+     */
+    fun notePhoto(url: String) {
+        if (!MediaUrls.isTweetPhoto(url)) return
+        record(url)
+    }
+
     private fun record(url: String) {
         val kind = classify(url) ?: return
         synchronized(seen) {
-            seen.removeAll { it.url == url }
-            seen.add(Seen(url, kind, System.currentTimeMillis()))
-            while (seen.size > CAP) seen.removeAt(0)
+            // VIDEO_INIT floods the capture set during playback (device 1.20 log: 285 init
+            // vs 84 photo). Keep the latest one for diagnostics/grouping but never let it
+            // consume the CAP budget that should hold masters and tweet photos.
+            if (kind == Kind.VIDEO_INIT) {
+                seen.removeAll { it.kind == Kind.VIDEO_INIT }
+                seen.add(Seen(url, kind, System.currentTimeMillis()))
+            } else {
+                seen.removeAll { it.url == url }
+                // For photos, keep one entry per photoKey at the highest-quality URL seen.
+                if (kind == Kind.PHOTO) {
+                    val key = MediaUrls.photoKey(url)
+                    if (key != null) {
+                        seen.removeAll {
+                            it.kind == Kind.PHOTO && MediaUrls.photoKey(it.url) == key
+                        }
+                    }
+                }
+                seen.add(Seen(url, kind, System.currentTimeMillis()))
+            }
+            while (seen.size > CAP) {
+                val dropIdx = seen.indexOfFirst { it.kind == Kind.VIDEO_INIT }
+                    .takeIf { it >= 0 }
+                    ?: seen.indexOfFirst { it.kind == Kind.HLS_VARIANT }
+                        .takeIf { it >= 0 }
+                    ?: 0
+                seen.removeAt(dropIdx)
+            }
+            updateFocus(kind, url)
         }
-        DiagLog.line("$MARK $kind ${url.take(URL_LOG_LIMIT)}")
+        // Log each distinct URL once. HLS playback re-requests the same playlist and init segment
+        // continuously: the 20260828 session was 318 lines, 280 of them MEDIASPY, carrying only 53
+        // distinct payloads -- one VIDEO_INIT URL appeared 18 times. That repetition is what buried
+        // the lines that matter, so the flood is dropped here rather than filtered when reading.
+        if (logged.add(url)) {
+            DiagLog.line("$MARK $kind ${url.take(URL_LOG_LIMIT)}")
+        }
+    }
+
+    /**
+     * URLs already written to the log, so a repeat request is silent.
+     *
+     * Separate from [seen], which is the capture set the downloader picks from and is capped and
+     * evicted: an eviction must not make a URL loggable again. Bounded independently so a long
+     * session cannot grow it without limit.
+     */
+    private val logged = object : LinkedHashSet<String>() {
+        override fun add(element: String): Boolean {
+            val added = super.add(element)
+            if (added && size > LOG_DEDUP_CAP) iterator().let { it.next(); it.remove() }
+            return added
+        }
+    }
+
+    /**
+     * Updates [focus] from a newly recorded capture.
+     *
+     * Rules (1.23):
+     * - Display photo → lock that photoKey (strong: user is looking at an image).
+     * - VIDEO_INIT → lock that mediaId **only if** focus is not a display photo (init flood
+     *   must not demote a photo the user just focused; device 1.21).
+     * - HLS_MASTER → lock mediaId when focus is empty or already that video; never steal a
+     *   display-photo focus on master alone (prefetch while scrolling).
+     * - Tiny/non-display photos and variants never set focus.
+     */
+    private fun updateFocus(kind: Kind, url: String) {
+        when (kind) {
+            Kind.PHOTO -> {
+                if (!MediaUrls.isDisplayPhoto(url)) return
+                val key = MediaUrls.photoKey(url) ?: return
+                focus = Focus(Kind.PHOTO, key, System.currentTimeMillis())
+                DiagLog.line("$MARK FOCUS photo key=$key")
+            }
+            Kind.VIDEO_INIT -> {
+                val id = MediaUrls.mediaId(url) ?: return
+                val cur = focus
+                if (cur?.kind == Kind.PHOTO) return
+                if (cur?.kind == Kind.HLS_MASTER && cur.key == id) return
+                focus = Focus(Kind.HLS_MASTER, id, System.currentTimeMillis())
+                DiagLog.line("$MARK FOCUS video media=$id via init")
+            }
+            Kind.HLS_MASTER -> {
+                val id = MediaUrls.mediaId(url) ?: return
+                val cur = focus
+                // Display-photo focus is stronger than a bare master (timeline prefetch).
+                if (cur?.kind == Kind.PHOTO) return
+                if (cur?.kind == Kind.HLS_MASTER && cur.key == id) {
+                    // Refresh lock time for the same group (tag= rotation).
+                    focus = Focus(Kind.HLS_MASTER, id, System.currentTimeMillis())
+                    return
+                }
+                // A *watched* video (VIDEO_INIT for the locked media id) is protected from
+                // bare master prefetch of other ids. A master-only focus is weak: pure
+                // recency between masters must still work (prefersMostRecentWithinAKind).
+                if (cur?.kind == Kind.HLS_MASTER) {
+                    val curStillPlaying = seen.any {
+                        it.kind == Kind.VIDEO_INIT && MediaUrls.mediaId(it.url) == cur.key
+                    }
+                    if (curStillPlaying) {
+                        DiagLog.line(
+                            "$MARK FOCUS keep video media=${cur.key} (playing); ignore master $id",
+                        )
+                        return
+                    }
+                }
+                focus = Focus(Kind.HLS_MASTER, id, System.currentTimeMillis())
+                DiagLog.line("$MARK FOCUS video media=$id via master")
+            }
+            Kind.HLS_VARIANT -> Unit
+        }
     }
 
     /**
@@ -204,28 +351,165 @@ internal object MediaSpy {
      * The newest capture identifies the media group; the master for *that* group is preferred, with
      * any master as a fallback so a tap still works if the group's master scrolled out of the cap.
      */
-    fun best(): Seen? = synchronized(seen) {
-        val videos = seen.filter { it.kind != Kind.PHOTO }
-        if (videos.isEmpty()) return null
-        val newestId = videos.maxByOrNull { it.seenAt }?.let { MediaUrls.mediaId(it.url) }
-        val masters = videos.filter { it.kind == Kind.HLS_MASTER }
-        return masters.filter { MediaUrls.mediaId(it.url) == newestId }.maxByOrNull { it.seenAt }
-            ?: masters.maxByOrNull { it.seenAt }
+    fun best(tweetId: String? = null): List<Seen> = synchronized(seen) {
+        // status id ≠ media id (device logs). tweetId is diagnostic only for capture matching.
+        if (tweetId != null) {
+            DiagLog.line("$MARK best(status=$tweetId)")
+        }
+
+        // VIDEO_INIT must not drive selection: playback and timeline prefetch flood it and
+        // made every photo lose a pure recency contest (device 1.21).
+        val masters = seen.filter { it.kind == Kind.HLS_MASTER }
+        val displayPhotos = seen
+            .filter { it.kind == Kind.PHOTO && MediaUrls.isDisplayPhoto(it.url) }
+            .sortedByDescending { it.seenAt }
+        val anyTweetPhotos = seen
+            .filter { it.kind == Kind.PHOTO && MediaUrls.isTweetPhoto(it.url) }
+            .sortedByDescending { it.seenAt }
+
+        // 1.23 focus lock: if the locked group is still in the capture set, serve it.
+        // Dropped from the cap → fall through to recency so a tap still works.
+        val locked = focus
+        if (locked != null) {
+            when (locked.kind) {
+                Kind.PHOTO -> {
+                    val pool = displayPhotos.ifEmpty { anyTweetPhotos }
+                    val hits = pool
+                        .filter { MediaUrls.photoKey(it.url) == locked.key }
+                        .distinctBy { MediaUrls.photoKey(it.url) }
+                    if (hits.isNotEmpty()) {
+                        DiagLog.line("$MARK best via FOCUS photo key=${locked.key}")
+                        return hits
+                    }
+                }
+                Kind.HLS_MASTER -> {
+                    val hit = masters
+                        .filter { MediaUrls.mediaId(it.url) == locked.key }
+                        .maxByOrNull { it.seenAt }
+                    if (hit != null) {
+                        DiagLog.line("$MARK best via FOCUS video media=${locked.key}")
+                        return listOf(hit)
+                    }
+                }
+                else -> Unit
+            }
+        }
+
+        val newestMaster = masters.maxByOrNull { it.seenAt }
+        val newestDisplay = displayPhotos.firstOrNull()
+        val newestPhoto = newestDisplay ?: anyTweetPhotos.firstOrNull()
+
+        // Prefer a real photo when it is the freshest *meaningful* capture, or when it was
+        // harvested/seen at least as recently as the newest master. Tinies alone never win.
+        if (newestDisplay != null) {
+            val masterAt = newestMaster?.seenAt ?: -1L
+            if (newestDisplay.seenAt >= masterAt) {
+                val key = MediaUrls.photoKey(newestDisplay.url)
+                return displayPhotos
+                    .filter { MediaUrls.photoKey(it.url) == key }
+                    .distinctBy { MediaUrls.photoKey(it.url) }
+                    .ifEmpty { listOf(newestDisplay) }
+            }
+        }
+
+        // Harvested or captured tweet photo with no competing newer master → save the photo.
+        if (newestPhoto != null && newestMaster == null) {
+            val key = MediaUrls.photoKey(newestPhoto.url)
+            val pool = if (newestDisplay != null) displayPhotos else anyTweetPhotos
+            return pool.filter { MediaUrls.photoKey(it.url) == key }
+                .distinctBy { MediaUrls.photoKey(it.url) }
+                .ifEmpty { listOf(newestPhoto) }
+        }
+
+        if (newestMaster == null) return emptyList()
+        // Grouping still uses VIDEO_INIT/VARIANT: the segment stream identifies which video
+        // is on screen when a newer master was only prefetched (1.19 ablation).
+        // PHOTO recency contests above deliberately ignore VIDEO_INIT so init flood cannot
+        // demote a display photo.
+        val newestId = seen
+            .filter { it.kind != Kind.PHOTO }
+            .maxByOrNull { it.seenAt }
+            ?.let { MediaUrls.mediaId(it.url) }
+        val hit = masters.filter { MediaUrls.mediaId(it.url) == newestId }.maxByOrNull { it.seenAt }
+            ?: newestMaster
+        return listOf(hit)
     }
 
     /** Everything captured, newest first. Diagnostics only. */
     fun all(): List<Seen> = synchronized(seen) { seen.reversed() }
 
-    fun clear() = synchronized(seen) { seen.clear() }
+    fun clear() = synchronized(seen) {
+        seen.clear()
+        focus = null
+    }
 
     private val seen = mutableListOf<Seen>()
 
+    /**
+     * Locked media group the user is currently looking at.
+     *
+     * Timeline prefetch and VIDEO_INIT flood continuously re-order pure recency; without a
+     * focus, opening the share sheet a second later can offer a different tweet's media than
+     * the one on screen (device 1.18–1.22). Focus is updated only by strong signals:
+     * display photos, masters the user is actually playing (VIDEO_INIT for the same media id),
+     * and never by tiny thumbs or lone prefetched masters while a photo is focused.
+     */
+    private data class Focus(val kind: Kind, val key: String, val lockedAt: Long)
+
+    @Volatile private var focus: Focus? = null
+
+    /**
+     * Returns the photoKey of the photo the user is currently looking at, or null
+     * if focus is empty, stale, or on a video. Used by the share-sheet to download
+     * only the displayed photo rather than every photo in a multi-image tweet.
+     */
+    fun focusedPhotoKey(): String? {
+        val f = focus ?: return null
+        if (f.kind != Kind.PHOTO) return null
+        return f.key
+    }
+
+    /**
+     * Given a list of photo keys from [StatusMedia.resolve], returns the one the user
+     * most recently viewed, or null if none of them were seen.
+     *
+     * This solves the problem that [focusedPhotoKey] is global: between opening a tweet
+     * and tapping share, the user may scroll past other tweets whose photos overwrite
+     * the focus. But the photo the user actually looked at in the target tweet is still
+     * in [seen], and it was seen more recently than any other photo from that same tweet.
+     *
+     * The share sheet provides the status id; syndication provides the photo keys for
+     * that status; this method intersects those keys with the capture history to find
+     * the most recently viewed one — the photo the user was looking at when they tapped
+     * share, even if focus has since moved to another tweet.
+     */
+    fun mostRecentSeenPhotoKey(photoKeys: Collection<String>): String? = synchronized(seen) {
+        if (photoKeys.isEmpty()) return null
+        // Only consider display-quality photos (name=large or bigger).
+        // Timeline prefetch loads name=tiny/small for every visible tweet;
+        // those captures would make every photo in a multi-image tweet
+        // look "seen" even though the user never opened the image viewer.
+        val candidates = seen
+            .filter { it.kind == Kind.PHOTO && MediaUrls.isDisplayPhoto(it.url) }
+            .sortedBy { it.seenAt }
+        // When multiple photos from the same tweet were seen (image viewer
+        // preloads adjacent pages), pick the FIRST one seen — X loads the
+        // initially displayed photo before its neighbours, so the earliest
+        // display-quality capture is the strongest signal for which photo
+        // the user was looking at when they opened the tweet.
+        candidates.firstOrNull { MediaUrls.photoKey(it.url) in photoKeys }
+            ?.let { MediaUrls.photoKey(it.url) }
+    }
+
     private const val MARK = "MEDIASPY"
+
+    /** Distinct URLs remembered for log de-duplication. */
+    private const val LOG_DEDUP_CAP = 512
 
     /** `DataSpec`'s 9-arg constructor. */
     private const val CTOR_ARITY = 9
 
-    private const val CAP = 32
+    private const val CAP = 48
     private const val URL_LOG_LIMIT = 160
 
 

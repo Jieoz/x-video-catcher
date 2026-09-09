@@ -4,9 +4,21 @@ An LSPosed module for the X (Twitter) Android client. It adds a **下载视频 /
 to X's native share sheet; tapping it saves the post's video or photos at the highest quality X
 offers, into `Movies/XVideoCatcher/` and `Pictures/XVideoCatcher/`.
 
-Everything runs inside X's process. There is no activity, no service, no background process, and
-no launcher icon — the APK exists only to be loaded into X by LSPosed. Installing it and opening
-it does nothing by design; the entry appears in X.
+Everything runs inside X's process. There is no service or background process. The APK also has a
+small launcher settings screen for the opt-in diagnostic-log switch; downloading itself remains an
+LSPosed hook inside X, with no standalone downloader or persistent process.
+
+> ### 1.55.0 restores the native share-row injection on X 12.24
+>
+> X 12.24 changed its share-row data class from
+> `[String,String,String,Object,boolean]` to `[String,String,String,Object,b]`, where `b` is the
+> nested metadata shape `[boolean,String,int]`. The resolver now accepts exactly those two verified
+> generations (plus the 12.13 Drawable icon form), and row construction copies the host's metadata
+> object unchanged while replacing only label, borrowed component identity, and icon. MediaSpy's
+> URL-capture path is unchanged.
+>
+> Validation covers X-shaped 12.13, 12.20.5 and 12.24 fixtures; the real 12.24 APK was not available
+> for offline bytecode reachability verification, so the final proof remains a device run.
 
 > ### 1.19.0 downloads real video: HLS mux instead of an init segment
 >
@@ -30,7 +42,7 @@ it does nothing by design; the entry appears in X.
 
 | Item | Value |
 | --- | --- |
-| Host app | `com.twitter.android` 12.13.0-release.0 (the build the device runs; anchors are resolved at runtime, not read from an APK) |
+| Host app | `com.twitter.android`; resolver fixtures cover 12.13.0-release.0, 12.20.5 and 12.24.0-prod.02 |
 | Module | `com.jiesa.xvideocatcher` |
 | minSdk / targetSdk | 28 / 35 |
 | Framework | LSPosed (Xposed API 82 floor) |
@@ -296,11 +308,12 @@ The log answers the questions worth asking, in order:
 | `NO tweet candidate` — full line `PROBE   <where> NO tweet candidate (visits=… exhausted=… roots=…)` | Nothing reachable from either root. Every field of the receiver is dumped, so the next step needs no second trip to the device |
 | `PROBE   media extracted: N item(s)` | The production extractor ran and found media — downloading would have worked |
 | `PROBE sheet opened via …` | **Expected to be absent.** `chooser.j.J0` belongs to the legacy chooser, proven off the tweet-share path (see below). If this appears, X has switched sheet implementations and every anchor needs rechecking |
-| **`INJECT controller=`**`<class> show=<method>` | **The first line to look for.** Both injector anchors resolved. A following `INJECT controller MISS` instead means no download row will appear this session, and says so rather than leaving an absence to interpret |
-| `INJECT hook FAILED <name>: …` | That injector hook could not be installed. Names which; the others still install |
-| **`INJECT row added`**` (N item(s), list size=…)` | **The line that means it worked.** The download row was appended to the sheet the host is about to render, with the media count behind it |
-| `INJECT sheet opened, no downloadable media` | The sheet opened on a text-only or unsupported post, so no row was added. Expected on such posts — this is the difference between "correctly did nothing" and "broken", which is why it is a line and not silence |
-| **`INJECT tap claimed`** | **A key line.** A tap on the injected row reached the module and the download started. Its absence after `row added` localises the failure to dispatch rather than to injection |
+| `INJECT resolve state=… ctor=… row=… dispatch=…` | Row/action/dispatch/state resolved and constructor/tap hooks were armed |
+| `INJECT row added (APPEND …)` | **The line that means it worked.** A separate download row was inserted into the state constructor input; no host row was replaced |
+| `INJECT tap claimed` | A tap on the injected row reached the module and download resolution started |
+| `MEDIASPY HLS_MASTER` / `HLS_VARIANT` / `VIDEO_INIT` | The host player URL capture path is armed and observing that media group |
+| `INJECT row-class MISS -- cannot build a row` | The host row shape is newer than the resolver; action/state/dispatch MISS lines after it are cascading, not separate faults |
+| `INJECT hook FAILED <name>: …` | That injector hook could not be installed; the failure is caught so X keeps running |
 | `ERROR probe` … failed: … | A probe hook threw. It is caught, because a throw inside a host callback surfaces as X crashing |
 
 The markers matter more than their contents. Earlier diagnosis was ambiguous because "the hook never
@@ -330,13 +343,10 @@ It is a second copy, not the primary path.
 
 ## Limits
 
-- **Anchored to X 12.13.0-release.0** (`versionCode` 312130000), verified against that exact APK.
-  Earlier releases were anchored to 12.13.0-**beta**.0 while the device ran release, and the two
-  channels are obfuscated separately: the beta media entity is `entity.b0`, the release one is
-  `entity.c0`. That mismatch is what the device reported as
-  `com.twitter.model.core.entity.b0 not found`, and it was misread for four releases as a search
-  problem. A shape lookup absorbs field renames; it cannot absorb being pointed at the wrong
-  build. `tools/verify_host_anchors.py <apk>` is the check that settles it.
+- **Row-shape compatibility is covered for X 12.13, 12.20.5 and 12.24.0-prod.02.** The 12.24
+  evidence is a real device diagnostic dump, not the host APK: it proves the new row and nested
+  metadata field shapes, while constructor/call-site reachability still needs the unavailable
+  12.24 APK or a device run. A resolver miss suppresses the row and never propagates into X.
 - **`ANIMATED_GIF` is handled as video** (X serves GIFs as MP4). `MODEL3D` and unknown types are
   skipped rather than guessed at.
 - **Highest bitrate, not highest resolution.** For X's progressive renditions these coincide;

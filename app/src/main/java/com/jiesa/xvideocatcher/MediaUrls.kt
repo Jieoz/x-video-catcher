@@ -94,6 +94,30 @@ object MediaUrls {
 
     fun isPhoto(url: String): Boolean = isInterestingPhoto(url.lowercase())
 
+    /** True only for real tweet photos under /media/, not video posters. */
+    fun isDisplayPhoto(url: String): Boolean {
+        if (!isTweetPhoto(url)) return false
+        val lower = url.lowercase()
+        // Timeline rows request name=tiny|small constantly; those must not steal "current photo".
+        if ("name=tiny" in lower || "name=small" in lower) return false
+        return true
+    }
+
+    fun isTweetPhoto(url: String): Boolean {
+        val lower = url.lowercase()
+        if (!isInterestingPhoto(lower)) return false
+        return lower.contains("/media/")
+    }
+
+    /** Video poster/thumb only — identifies a video post, not a saveable photo. */
+    fun isVideoPoster(url: String): Boolean {
+        val lower = url.lowercase()
+        if (!isInterestingPhoto(lower)) return false
+        return lower.contains("tweet_video_thumb")
+            || lower.contains("ext_tw_video_thumb")
+            || lower.contains("amplify_video_thumb")
+    }
+
     /** Any playlist. */
     fun isManifest(url: String): Boolean {
         val lower = url.lowercase()

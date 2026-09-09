@@ -81,6 +81,8 @@ object Http {
         throw last ?: java.io.IOException("request failed: ${url.take(140)}")
     }
 
+    fun bytes(url: String): ByteArray = request(url) { it.readBytes() }
+
     fun text(url: String): String = request(url) { it.readBytes().toString(Charsets.UTF_8) }
 
     /**

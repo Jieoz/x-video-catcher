@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The module's own icon.
+
+  This exists because up to 1.50 the manifest pointed android:icon at the framework resource
+  @android:drawable/ic_menu_save. HostRow asks PackageManager.getApplicationIcon() for the module icon
+  and puts it on the injected share row, so what the user saw was whatever that ancient platform id
+  resolves to on their ROM. On the reporting device it came out as a Bluetooth glyph, because OEM
+  theme layers remap the pre-API-11 ic_menu_ set freely. A drawable shipped inside our own APK cannot
+  be remapped by anyone.
+
+  Vector rather than a raster set: one file covers every density, and the row renders it at whatever
+  size Compose asks for.
+
+  Shape: a downward arrow into a tray, the standard download affordance, so the row reads as
+  "download" at a glance next to Telegram and WhatsApp instead of needing its label read.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Solid background. Keeps the glyph legible on both light and dark sheets, which a bare path
+         does not: the share sheet draws rows on the theme background. -->
+    <path
+        android:fillColor="#1D9BF0"
+        android:pathData="M0,0h108v108H0z" />
+
+    <!-- Arrow shaft and head, pointing down into the tray. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M48,26h12v28h14L54,76 34,54h14z" />
+
+    <!-- Tray. Open-topped so the arrow reads as entering it. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M28,76h6v6h40v-6h6v12H28z" />
+</vector>
