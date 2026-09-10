@@ -300,9 +300,9 @@ internal object HostRow {
         val packageField = packageFieldOf(template, fields, labelField)
         val activityField = activityFieldOf(template, fields, labelField)
         // Legacy rows have one non-String reference (the icon). X 12.24 adds a second reference:
-        // metadata whose verified field shape is [boolean,String,int]. Exclude that metadata type so
-        // the icon remains unambiguous; every other constructor value, including the metadata object,
-        // is copied from the host template unchanged below.
+        // enum metadata whose full shape is [boolean,String,int] after inherited name/ordinal are
+        // included. Exclude that metadata type so the icon remains unambiguous; every other
+        // constructor value, including the metadata enum instance, is copied unchanged below.
         val iconField = fields.firstOrNull {
             it.type.name == DRAWABLE || Drawable::class.java.isAssignableFrom(it.type)
         } ?: fields.singleOrNull {

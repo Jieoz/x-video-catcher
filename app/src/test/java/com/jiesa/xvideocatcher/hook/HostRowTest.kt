@@ -36,11 +36,10 @@ class HostRowTest {
     }
 
     @Suppress("unused")
-    private class Metadata(
-        val enabled: Boolean,
-        val key: String,
-        val rank: Int,
-    )
+    private enum class Metadata(val capturesShareCard: Boolean) {
+        Text(false),
+        InstagramStories(true),
+    }
 
     @Suppress("unused")
     private class MetadataRow(
@@ -53,7 +52,7 @@ class HostRowTest {
 
     @Test
     fun `12_24 copy rewrites icon but preserves metadata by identity`() {
-        val metadata = Metadata(true, "verified-host-value", 7)
+        val metadata = Metadata.Text
         val template = MetadataRow(
             "com.whatsapp",
             "com.whatsapp.A",

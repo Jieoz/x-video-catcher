@@ -57,13 +57,17 @@ class RowShapeTest {
         override fun toString(): String = "row"
     }
 
-    /** The 12.24 shape, verbatim from the 20260909 device log. */
+    /**
+     * The 12.24 metadata type is an enum. Its diagnostic instance shape is
+     * `[boolean,String,int]` because every enum instance inherits `name` and `ordinal`; only the
+     * boolean is declared by the host enum itself.
+     */
     @Suppress("unused")
-    private class Metadata(
-        val a: Boolean,
-        val b: String,
-        val c: Int,
-    )
+    private enum class Metadata(val capturesShareCard: Boolean) {
+        Text(false),
+        InstagramStories(true),
+        SnapchatCamera(true),
+    }
 
     @Suppress("unused")
     private class MetadataRow(
@@ -150,6 +154,11 @@ class RowShapeTest {
     @Test
     fun `the 12_24 row with the verified nested metadata shape matches`() {
         assertTrue(HostResolver.isRowShape(MetadataRow::class.java))
+    }
+
+    @Test
+    fun `the 12_24 enum metadata shape matches including inherited enum state`() {
+        assertTrue(HostResolver.isRowMetadataShape(Metadata::class.java))
     }
 
     @Test

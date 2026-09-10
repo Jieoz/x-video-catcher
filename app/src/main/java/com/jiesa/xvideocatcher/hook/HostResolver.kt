@@ -94,13 +94,15 @@ internal object HostResolver {
      *
      *  - 12.13: `String,String,String,Drawable,boolean`
      *  - 12.20.5: `String,String,String,Object,boolean`
-     *  - 12.24: `String,String,String,Object,M`, where `M` is exactly
-     *    `boolean,String,int`
+     *  - 12.24: `String,String,String,Object,M`, where `M` is an enum whose full instance
+     *    shape is exactly `boolean,String,int` (one declared boolean plus inherited enum name and
+     *    ordinal)
      *
-     * The 12.24 branch deliberately verifies the nested metadata shape instead of accepting any
-     * fifth reference field. The two non-String references then have distinct roles: the only field
-     * that is not metadata is the icon. The legacy branch rejects metadata-shaped icons for the same
-     * reason, so the new shape cannot make an unrelated data class a second candidate.
+     * The 12.24 branch deliberately verifies the nested enum metadata shape instead of accepting
+     * any fifth reference field. The two non-String references then have distinct roles: the only
+     * non-metadata reference is the icon, while the enum metadata is copied unchanged from the host
+     * template row. The legacy branch rejects metadata-shaped icons for the same reason, so the new
+     * shape cannot make an unrelated data class a second candidate.
      */
     internal fun isRowShape(cls: Class<*>): Boolean {
         if (cls.isInterface || cls.isEnum || Modifier.isAbstract(cls.modifiers)) return false
@@ -121,7 +123,7 @@ internal object HostResolver {
         }
         val fieldShapeMatches = when {
             legacyFlag != null -> metadataFields.isEmpty() && iconFields.size == 1
-            metadataFields.size == 1 -> iconFields.size == 1
+            metadataFields.size == 1 -> metadataTypes.size == 1 && iconFields.size == 1
             else -> false
         }
         if (!fieldShapeMatches) return false
@@ -130,11 +132,13 @@ internal object HostResolver {
         return methods.containsAll(listOf("equals", "hashCode", "toString"))
     }
 
-    /** X 12.24's verified share-row metadata: one boolean, one String and one int. */
+    /**
+     * X 12.24's share-row metadata is an enum with one declared boolean property. The diagnostic
+     * shape includes Enum.name:String and Enum.ordinal:int inherited from java.lang.Enum, which is
+     * why it is reported as `[boolean,String,int]` even though only the boolean is declared on `b`.
+     */
     internal fun isRowMetadataShape(cls: Class<*>): Boolean {
-        if (cls.isPrimitive || cls.isArray || cls.isInterface || cls.isEnum ||
-            Modifier.isAbstract(cls.modifiers)
-        ) return false
+        if (!cls.isEnum || cls.superclass != Enum::class.java) return false
         val fields = instanceFields(cls)
         return fields.size == ROW_METADATA_FIELD_COUNT &&
             fields.count { it.type == Boolean::class.javaPrimitiveType } == 1 &&
@@ -588,7 +592,7 @@ internal object HostResolver {
     /** Field count of the share-row model on the verified builds. */
     private const val ROW_FIELD_COUNT = 5
 
-    /** Field count of X 12.24's nested share-row metadata object. */
+    /** Field count of X 12.24's enum metadata including inherited Enum name and ordinal. */
     private const val ROW_METADATA_FIELD_COUNT = 3
 
     /**
