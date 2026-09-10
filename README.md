@@ -8,17 +8,18 @@ Everything runs inside X's process. There is no service or background process. T
 small launcher settings screen for the opt-in diagnostic-log switch; downloading itself remains an
 LSPosed hook inside X, with no standalone downloader or persistent process.
 
-> ### 1.55.0 restores the native share-row injection on X 12.24
+> ### 1.57.0 restores X 12.24 row construction
 >
-> X 12.24 changed its share-row data class from
-> `[String,String,String,Object,boolean]` to `[String,String,String,Object,b]`, where `b` is the
-> nested metadata shape `[boolean,String,int]`. The resolver now accepts exactly those two verified
-> generations (plus the 12.13 Drawable icon form), and row construction copies the host's metadata
-> object unchanged while replacing only label, borrowed component identity, and icon. MediaSpy's
-> URL-capture path is unchanged.
+> X 12.24 stores the row icon in an `Object` field even though the row constructor still requires a
+> `Drawable`. 1.56 resolved the row/state/action/dispatch chain, but rejected that real constructor
+> because it required every constructor parameter to equal its backing field type. Row cloning now
+> permits only this verified `Object`-field/`Drawable`-parameter icon slot, while preserving strict
+> equality for every other slot and copying the host metadata enum unchanged. MediaSpy's URL-capture
+> path is unchanged.
 >
-> Validation covers X-shaped 12.13, 12.20.5 and 12.24 fixtures; the real 12.24 APK was not available
-> for offline bytecode reachability verification, so the final proof remains a device run.
+> Validation covers X-shaped 12.13, 12.20.5 and the exact 12.24 constructor mismatch. The real X
+> 12.24 APK and 1.56 device log now prove row/state/action/dispatch reachability; final row insertion
+> and tap/download remain device acceptance for 1.57.
 
 > ### 1.19.0 downloads real video: HLS mux instead of an init segment
 >
@@ -60,7 +61,7 @@ Four pieces, in the order they run:
 | --- | --- |
 | `XVideoCatcherModule` | entry point; installs hooks once a host `Application` context exists |
 | `ShareSheetInjector` | adds the download row to the tweet action sheet and claims taps on it |
-| `HostRow` | builds the row by cloning one the host made, so no constructor signature is guessed |
+| `HostRow` | clones a host row through its verified constructor, preserving metadata and rewriting only identity, label and icon |
 | `SharePathProbe` | Observes sheet open, row list and tap dispatch; adds nothing to the UI |
 | `TweetSearch` | Bounded breadth-first search for the tweet model, over hook receivers, the Decompose component tree and the foreground activity |
 | `HostActivity` | Tracks the foreground activity via `Application.registerActivityLifecycleCallbacks` |
@@ -343,10 +344,10 @@ It is a second copy, not the primary path.
 
 ## Limits
 
-- **Row-shape compatibility is covered for X 12.13, 12.20.5 and 12.24.0-prod.02.** The 12.24
-  evidence is a real device diagnostic dump, not the host APK: it proves the new row and nested
-  metadata field shapes, while constructor/call-site reachability still needs the unavailable
-  12.24 APK or a device run. A resolver miss suppresses the row and never propagates into X.
+- **Row-shape compatibility is covered for X 12.13, 12.20.5 and 12.24.0-prod.02.** The 12.24 host
+  APK proves the metadata enum and constructor signature; its 1.56 device log proves row/state/
+  action/dispatch resolution. A resolver or constructor mismatch suppresses the row and never
+  propagates into X.
 - **`ANIMATED_GIF` is handled as video** (X serves GIFs as MP4). `MODEL3D` and unknown types are
   skipped rather than guessed at.
 - **Highest bitrate, not highest resolution.** For X's progressive renditions these coincide;

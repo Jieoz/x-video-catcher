@@ -46,9 +46,25 @@ class HostRowTest {
         val packageName: String,
         val activityName: String,
         val label: String,
+        icon: Drawable,
+        metadata: Metadata,
+    ) {
+        // X 12.24 widens the stored field to Object although its primary constructor still takes
+        // Drawable. Field/constructor type equality is therefore not a valid clone criterion.
+        val icon: Any? = icon
+        val metadata: Metadata = metadata
+    }
+
+    @Suppress("unused")
+    private class WrongNarrowMetadataRow(
+        val packageName: String,
+        val activityName: String,
+        val label: String,
         val icon: Any?,
-        val metadata: Metadata,
-    )
+        metadata: Metadata,
+    ) {
+        val metadata: Any? = metadata
+    }
 
     @Test
     fun `12_24 copy rewrites icon but preserves metadata by identity`() {
@@ -57,7 +73,7 @@ class HostRowTest {
             "com.whatsapp",
             "com.whatsapp.A",
             "WhatsApp",
-            Any(),
+            ColorDrawable(0xFF223344.toInt()),
             metadata,
         )
         val replacementIcon = ColorDrawable(0xFF00FF00.toInt())
@@ -72,6 +88,29 @@ class HostRowTest {
         assertEquals("下载媒体", copy.label)
         assertTrue(copy.icon === replacementIcon)
         assertTrue(copy.metadata === metadata)
+    }
+
+    @Test
+    fun `a narrowed non-icon constructor slot is rejected`() {
+        val template = WrongNarrowMetadataRow(
+            "com.whatsapp",
+            "com.whatsapp.A",
+            "WhatsApp",
+            ColorDrawable(0xFF223344.toInt()),
+            Metadata.Text,
+        )
+
+        assertNull(
+            HostRow.constructWithIdentity(
+                template,
+                "下载媒体",
+                HostRow.ShareIdentity(
+                    "com.discord",
+                    "com.discord.Share",
+                    ColorDrawable(0xFF00FF00.toInt()),
+                ),
+            ),
+        )
     }
 
     @Test

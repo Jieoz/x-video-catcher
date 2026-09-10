@@ -311,7 +311,7 @@ internal object HostRow {
                 !HostResolver.isRowMetadataShape(it.type)
         }
 
-        val ctor = matchingConstructor(cls, fields) ?: return null
+        val ctor = matchingConstructor(cls, fields, iconField) ?: return null
         val args = Array(fields.size) { i ->
             val f = fields[i]
             when {
@@ -332,11 +332,30 @@ internal object HostRow {
         }.getOrNull()
     }
 
-    private fun matchingConstructor(cls: Class<*>, fields: List<Field>): Constructor<*>? {
-        val wanted = fields.map { it.type }
-        return cls.declaredConstructors.firstOrNull { c ->
-            c.parameterTypes.toList() == wanted
+    /**
+     * Match the host primary constructor by slot order and assignment compatibility. X 12.24 stores
+     * the icon in an `Object` field but its constructor still requires `Drawable`; requiring exact
+     * field/parameter type equality therefore rejects the real row. A constructor parameter may be
+     * narrower than its field only in that verified icon slot. Other fields still require exact
+     * equality so arbitrary host references cannot make a constructor look compatible.
+     */
+    private fun matchingConstructor(
+        cls: Class<*>,
+        fields: List<Field>,
+        iconField: Field?,
+    ): Constructor<*>? {
+        val candidates = cls.declaredConstructors.filter { c ->
+            val params = c.parameterTypes
+            params.size == fields.size && params.indices.all { i ->
+                val fieldType = fields[i].type
+                val parameterType = params[i]
+                parameterType == fieldType ||
+                    (fields[i] == iconField &&
+                        fieldType == Any::class.java &&
+                        parameterType == Drawable::class.java)
+            }
         }
+        return candidates.singleOrNull()
     }
 
     private fun packageFieldOf(template: Any, fields: List<Field>, labelField: Field?): Field? =
