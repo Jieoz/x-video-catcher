@@ -6,8 +6,9 @@ import java.lang.reflect.Executable
 /**
  * Adapts the module's before/after hooks onto libxposed's interceptor chain.
  *
- * A before-hook that sets [Call.result] swallows the original call. Otherwise the original runs,
- * then the after-hook sees its return value. Exceptions from the original still propagate.
+ * [Call.args] is a mutable copy. libxposed's own argument list is immutable, so a before-hook that
+ * changes an element is applied by calling proceed with that copy. Setting [Call.result] swallows
+ * the original call. Exceptions from the original still propagate.
  */
 internal object HookBridge {
 
@@ -21,7 +22,7 @@ internal object HookBridge {
 
     class Call(private val chain: XposedInterface.Chain) {
         val thisObject: Any? get() = chain.thisObject
-        val args: List<Any?> get() = chain.args
+        val args: Array<Any?> = chain.args.toTypedArray()
 
         private var replaced = false
         private var replacement: Any? = null
@@ -35,7 +36,7 @@ internal object HookBridge {
 
         internal val swallowed: Boolean get() = replaced
 
-        internal fun proceed(): Any? = chain.proceed()
+        internal fun proceed(): Any? = chain.proceed(args)
     }
 
     fun hook(origin: Executable, before: Before? = null, after: After? = null) {
