@@ -3,8 +3,6 @@ package com.jiesa.xvideocatcher.hook
 import com.jiesa.xvideocatcher.DiagLog
 import com.jiesa.xvideocatcher.HostLog
 import com.jiesa.xvideocatcher.ModuleSettings
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
 import java.lang.reflect.Constructor
 
 /**
@@ -157,11 +155,9 @@ internal class ShareSheetInjector(
      * carries the module's label.
      */
     private fun hookStateBuild(ctor: Constructor<*>, rowClass: Class<*>) {
-        XposedBridge.hookMethod(ctor, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                runCatching { injectInto(param.args, ctor.parameterTypes, rowClass) }
-                    .onFailure { DiagLog.line("$MARK row-inject failed: $it") }
-            }
+        HookBridge.hook(ctor, before = HookBridge.Before { call ->
+            runCatching { injectInto(call.args, ctor.parameterTypes, rowClass) }
+                .onFailure { DiagLog.line("$MARK row-inject failed: $it") }
         })
     }
 
@@ -283,31 +279,22 @@ internal class ShareSheetInjector(
      * wrote is what makes a foreign row impossible to claim by accident.
      */
     private fun hookDispatch(point: HostResolver.DispatchPoint) {
-        XposedBridge.hookMethod(point.method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                runCatching {
-                    val action = param.args.getOrNull(0) ?: return
-                    val context = XVideoCatcherModule.appContext ?: return
-                    if (!isOurs(action, context)) return
+        HookBridge.hook(point.method, before = HookBridge.Before { call ->
+            runCatching {
+                val action = call.args.getOrNull(0) ?: return@Before
+                val context = XVideoCatcherModule.appContext ?: return@Before
+                if (!isOurs(action, context)) return@Before
 
-                    DiagLog.line(ProbeMarkers.INJECT_TAP)
-                    // Harvest only feeds MediaSpy, which `downloadCaptured` consults only when no
-                    // status id was frozen. With one bound this walked ~400 nodes over the live
-                    // sheet graph to fill a cache nothing would read: every share on the 20260829
-                    // log logged `HARVEST photos=0` and then resolved via the status anyway. Asking
-                    // the same question the downloader is about to ask keeps the walk for the odd
-                    // hosts that need it and takes it off the taps that do not.
-                    if (DownloaderState.activeTweetId.isNullOrEmpty()) {
-                        CaptureHarvest.recordPhotosFrom(param.thisObject, *param.args)
-                    }
-                    // Swallow the host's handling: it has no branch for a row it did not build.
-                    param.result = null
-                    downloader.downloadCaptured(context)
-                }.onFailure {
-                    DiagLog.line("$MARK tap failed: $it")
+                DiagLog.line(ProbeMarkers.INJECT_TAP)
+                if (DownloaderState.activeTweetId.isNullOrEmpty()) {
+                    CaptureHarvest.recordPhotosFrom(call.thisObject, *call.args)
                 }
-                DiagLog.flushNow()
+                call.result = null
+                downloader.downloadCaptured(context)
+            }.onFailure {
+                DiagLog.line("$MARK tap failed: $it")
             }
+            DiagLog.flushNow()
         })
     }
 

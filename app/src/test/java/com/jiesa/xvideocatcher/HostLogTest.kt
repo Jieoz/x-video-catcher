@@ -42,12 +42,12 @@ class HostLogTest {
         // the case above is exercising the catch and not passing for a trivial reason.
         var raised: Throwable? = null
         try {
-            Class.forName("de.robv.android.xposed.XposedBridge")
+            Class.forName("io.github.libxposed.api.XposedInterface")
         } catch (t: Throwable) {
             raised = t
         }
         org.junit.Assert.assertTrue(
-            "XposedBridge resolved in a unit test, so these tests no longer prove anything",
+            "libxposed API resolved in a unit test, so these tests no longer prove anything",
             raised != null,
         )
     }

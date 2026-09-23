@@ -14,8 +14,8 @@ import android.widget.Toast
  * Module settings UI. Opened from the launcher icon on this package — not from inside X.
  *
  * LSPosed still loads the hook APK into X; this activity only runs in *our* process so the
- * user can flip preferences without adb. [ModuleSettings] bridges the value into the host
- * via XSharedPreferences.
+ * user can flip preferences without adb. [ModuleSettings] copies the value into libxposed
+ * remote preferences, which the hook reads inside X.
  */
 class SettingsActivity : Activity() {
 

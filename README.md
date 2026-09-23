@@ -232,7 +232,8 @@ The workflow runs unit tests and reports real per-class counts (Gradle is silent
 green step alone would not prove any test ran), builds the APK, verifies the signing key, then
 asserts the module contract against the built artifact rather than the source:
 
-- `assets/xposed_init` names the entry class and `xposedminversion` is present
+- `META-INF/xposed/java_init.list` names the entry class and `minApiVersion=102` is present
+- the legacy `assets/xposed_init` entry and `xposedsharedprefs` marker are absent
 - no provider, service, activity or receiver authority is declared
 - the Xposed API is **not** bundled into the APK (a bundled copy breaks hook dispatch)
 - the URL-parsing, host-reflection, download and share-sheet layers are all present at the dex level
@@ -344,8 +345,7 @@ attach so the file proves attachment before you touch anything. Records that can
 queued rather than being dropped; the earliest ones are produced before a `Context` exists, and
 those are precisely the ones that prove the module loaded.
 
-`XposedBridge.log` still receives the fatal lines, for anyone who prefers LSPosed's own log viewer.
-It is a second copy, not the primary path.
+Android `Log` receives the fatal lines, for anyone who prefers logcat. It is a second copy, not the primary path.
 
 ## Limits
 

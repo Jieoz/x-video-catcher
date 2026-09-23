@@ -1,7 +1,6 @@
 package com.jiesa.xvideocatcher.hook
 
-import android.content.pm.PackageManager
-import android.content.res.XModuleResources
+import android.content.res.AssetManager
 import android.graphics.drawable.Drawable
 import com.jiesa.xvideocatcher.DiagLog
 import com.jiesa.xvideocatcher.R
@@ -43,7 +42,7 @@ import com.jiesa.xvideocatcher.R
 internal object ModuleIcon {
 
     /**
-     * Absolute path of the module APK, published by `initZygote`.
+     * Absolute path of the module APK, published by onModuleLoaded.
      *
      * Volatile rather than lateinit: it is written on the zygote thread and read on whichever thread
      * builds a sheet row, and a missing value has to degrade rather than throw.
@@ -82,15 +81,13 @@ internal object ModuleIcon {
 
     private fun loadFromModuleApk(): Drawable {
         val path = modulePath
-            ?: error("modulePath not set; initZygote did not run (module list entry missing?)")
-        // createInstance takes an XResources to inherit display metrics from, and null is the
-        // documented value when there is none to inherit. The host's Resources cannot be passed: it is
-        // only an XResources when resource hooking is active, which this module does not request. A
-        // vector at a fixed 108dp does not need the host's density anyway — Compose scales it to the
-        // row's slot.
-        val res = XModuleResources.createInstance(path, null)
-        // Theme-less overload: ic_module uses literal colours, and there is no theme to resolve
-        // against here in any case.
+            ?: error("modulePath not set; onModuleLoaded did not run")
+        val assets = AssetManager::class.java.getDeclaredConstructor().newInstance()
+        val add = AssetManager::class.java.getDeclaredMethod("addAssetPath", String::class.java)
+        add.isAccessible = true
+        val cookie = add.invoke(assets, path) as Int
+        if (cookie == 0) error("addAssetPath returned 0 for $path")
+        val res = android.content.res.Resources(assets, null, null)
         @Suppress("DEPRECATION")
         return res.getDrawable(R.drawable.ic_module)
             ?: error("ic_module resolved to null")

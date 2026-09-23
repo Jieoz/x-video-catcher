@@ -140,15 +140,18 @@ jobs:
           APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           echo "apk=$APK build-tools=$BT"
-          # The framework loads the module by the class named in assets/xposed_init.
-          # A missing or misspelled entry means LSPosed silently ignores the module.
-          ENTRY=$(unzip -p "$APK" assets/xposed_init | tr -d '\r\n')
+          # LSPosed 2.2+ loads the module by the class named in META-INF/xposed/java_init.list.
+          # A missing or misspelled entry means the framework silently ignores the module.
+          ENTRY=$(unzip -p "$APK" META-INF/xposed/java_init.list | tr -d '\r\n')
           test "$ENTRY" = "com.jiesa.xvideocatcher.hook.XVideoCatcherModule"
-          # xposedminversion is what marks this as a legacy module to LSPosed.
-          "$BT/aapt2" dump xmltree --file AndroidManifest.xml "$APK" | grep -q 'xposedminversion'
-          # The Xposed API must stay provided-only; a bundled copy breaks hooking.
+          unzip -p "$APK" META-INF/xposed/module.prop | grep -q '^minApiVersion=102$'
+          unzip -p "$APK" META-INF/xposed/scope.list | grep -qx 'com.twitter.android'
+          # The legacy entry and the world-readable preference marker must both be gone.
+          # LSPosed 2.3 removes the bridge those files depend on.
+          test -z "$(unzip -l "$APK" | grep -E 'assets/xposed_init|xposedsharedprefs' || true)"
+          # Neither Xposed API may be bundled; the framework provides libxposed at runtime.
           unzip -l "$APK" | grep -q 'classes.dex'
-          test -z "$(unzip -l "$APK" | grep -i 'de/robv/android/xposed' || true)"
+          test -z "$(unzip -l "$APK" | grep -Ei 'de/robv/android/xposed|io/github/libxposed' || true)"
           # The probe log must not depend on the hooked app reaching a provider we own.
           # Under API 30+ package visibility filtering X cannot resolve our authority
           # (we cannot add <queries> to X's manifest), so such a sink silently drops

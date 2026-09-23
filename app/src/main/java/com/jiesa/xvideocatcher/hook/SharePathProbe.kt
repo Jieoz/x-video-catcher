@@ -2,8 +2,6 @@ package com.jiesa.xvideocatcher.hook
 
 import com.jiesa.xvideocatcher.DiagLog
 import com.jiesa.xvideocatcher.HostLog
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
 import java.lang.reflect.Modifier
 
 /**
@@ -116,14 +114,12 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
      * variant on the dead path could drift from the one that actually reports.
      */
     private fun hookSheetOpen(method: java.lang.reflect.Method) {
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                runCatching {
-                    DiagLog.line("${ProbeMarkers.SHEET_OPENED} ${method.declaringClass.name}.${method.name}")
-                    findTweetFrom("sheet-open", param.args.getOrNull(0))
-                    DiagLog.flushNow()
-                }.onFailure { DiagLog.line("${ProbeMarkers.PROBE_ERROR} sheet-open failed: $it") }
-            }
+        HookBridge.hook(method, before = HookBridge.Before { call ->
+            runCatching {
+                DiagLog.line("${ProbeMarkers.SHEET_OPENED} ${method.declaringClass.name}.${method.name}")
+                findTweetFrom("sheet-open", call.args.getOrNull(0))
+                DiagLog.flushNow()
+            }.onFailure { DiagLog.line("${ProbeMarkers.PROBE_ERROR} sheet-open failed: $it") }
         })
     }
 
@@ -175,65 +171,43 @@ internal class SharePathProbe(private val classLoader: ClassLoader) {
      * left alone rather than guessed at -- a null slot is the normal case, not a miss.
      */
     private fun hookStateConstructor(ctor: java.lang.reflect.Constructor<*>, rowClass: Class<*>) {
-        XposedBridge.hookMethod(ctor, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                runCatching {
-                    val slot = SheetRows.locate(param.args, rowClass)
-                    if (slot == null) {
-                        // Not yet populated. Logged at low volume because it is expected several
-                        // times per sheet open, and its absence would hide a genuine anchor problem.
-                        DiagLog.line("${ProbeMarkers.ROWS_BUILT} no row-bearing arg (pre-load state)")
-                        return
-                    }
-                    DiagLog.line(
-                        "${ProbeMarkers.ROWS_BUILT} ${slot.rows.size} row(s) " +
-                            "at arg[${slot.argIndex}], status=${SheetRows.statusIdIn(param.args) ?: "none"}"
-                    )
-                    slot.rows.take(MAX_ROWS_LOGGED).forEach { r ->
-                        DiagLog.line("PROBE   row ${describeRow(r)}")
-                    }
-                    if (slot.rows.size > MAX_ROWS_LOGGED) {
-                        DiagLog.line("PROBE   ... ${slot.rows.size - MAX_ROWS_LOGGED} more")
-                    }
-                    // Whether a row could be substituted here, without touching the live sheet.
-                    // 1.50: this must NOT go through SheetRows.substitute any more. That call used to
-                    // be free because it overwrote a slot with the object already in it; now it
-                    // inserts, and its fallback branch writes to the host's live list -- which a
-                    // copied argument array still points at. So the probe asks the type question
-                    // directly instead of performing a write to find out.
-                    val writable = SheetRows.canSubstitute(ctor.parameterTypes, slot)
-                    DiagLog.line("${ProbeMarkers.LIST_MUTABLE}$writable")
-                    // No findTweetFrom() here. This constructor runs on the sheet's own render path,
-                    // 13 times per open on the 20260829 log, and each graph search cost ~1,700 node
-                    // visits to report `media extracted: 0 item(s)` -- 352 searches, 0 hits, every
-                    // time. It cannot hit: the live share path carries a status URL, not a tweet
-                    // (1.6.0 established that), and MediaSpy supplies the media from the player
-                    // instead. Kept on the dispatch hook, which fires once per tap rather than per
-                    // frame, so a host redesign that starts carrying a tweet is still reported.
-                    DiagLog.flushNow()
-                }.onFailure { DiagLog.line("${ProbeMarkers.PROBE_ERROR} state-ctor failed: $it") }
-            }
+        HookBridge.hook(ctor, before = HookBridge.Before { call ->
+            runCatching {
+                val slot = SheetRows.locate(call.args, rowClass)
+                if (slot == null) {
+                    DiagLog.line("${ProbeMarkers.ROWS_BUILT} no row-bearing arg (pre-load state)")
+                    return@Before
+                }
+                DiagLog.line(
+                    "${ProbeMarkers.ROWS_BUILT} ${slot.rows.size} row(s) " +
+                        "at arg[${slot.argIndex}], status=${SheetRows.statusIdIn(call.args) ?: "none"}"
+                )
+                slot.rows.take(MAX_ROWS_LOGGED).forEach { r ->
+                    DiagLog.line("PROBE   row ${describeRow(r)}")
+                }
+                if (slot.rows.size > MAX_ROWS_LOGGED) {
+                    DiagLog.line("PROBE   ... ${slot.rows.size - MAX_ROWS_LOGGED} more")
+                }
+                val writable = SheetRows.canSubstitute(ctor.parameterTypes, slot)
+                DiagLog.line("${ProbeMarkers.LIST_MUTABLE}$writable")
+                DiagLog.flushNow()
+            }.onFailure { DiagLog.line("${ProbeMarkers.PROBE_ERROR} state-ctor failed: $it") }
         })
     }
 
     /** Records a dispatched tap and which row it carried. */
     private fun hookDispatch(point: HostResolver.DispatchPoint) {
-        XposedBridge.hookMethod(point.method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                runCatching {
-                    val action = param.args.getOrNull(0) ?: return
-                    DiagLog.line(
-                        "${ProbeMarkers.ACTION} ${action.javaClass.name} " +
-                            "at ${point.method.declaringClass.name}.${point.method.name}"
-                    )
-                    describeAction(action)?.let { DiagLog.line("PROBE   $it") }
-                    // Second place a tweet reference could hang: the dispatcher itself. Asked at
-                    // both live hooks because either receiver would be enough for the real build,
-                    // and one round trip per candidate is the cost this probe exists to avoid.
-                    findTweetFrom("dispatch", param.thisObject)
-                    DiagLog.flushNow()
-                }.onFailure { DiagLog.line("${ProbeMarkers.PROBE_ERROR} dispatch failed: $it") }
-            }
+        HookBridge.hook(point.method, before = HookBridge.Before { call ->
+            runCatching {
+                val action = call.args.getOrNull(0) ?: return@Before
+                DiagLog.line(
+                    "${ProbeMarkers.ACTION} ${action.javaClass.name} " +
+                        "at ${point.method.declaringClass.name}.${point.method.name}"
+                )
+                describeAction(action)?.let { DiagLog.line("PROBE   $it") }
+                findTweetFrom("dispatch", call.thisObject)
+                DiagLog.flushNow()
+            }.onFailure { DiagLog.line("${ProbeMarkers.PROBE_ERROR} dispatch failed: $it") }
         })
     }
 

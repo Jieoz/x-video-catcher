@@ -3,8 +3,6 @@ package com.jiesa.xvideocatcher.hook
 import android.net.Uri
 import com.jiesa.xvideocatcher.DiagLog
 import com.jiesa.xvideocatcher.MediaUrls
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
 import java.lang.reflect.Modifier
 
 /**
@@ -98,14 +96,10 @@ internal object MediaSpy {
         }
 
         runCatching {
-            XposedBridge.hookMethod(ctor, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    // Never let a capture failure propagate: this runs on the host's playback path,
-                    // and an exception here would break video for the user to save a diagnostic.
-                    runCatching {
-                        val uri = param.args.getOrNull(0) as? Uri ?: return
-                        record(uri.toString())
-                    }
+            HookBridge.hook(ctor, after = HookBridge.After { call ->
+                runCatching {
+                    val uri = call.args.getOrNull(0) as? Uri ?: return@After
+                    record(uri.toString())
                 }
             })
             DiagLog.line("$MARK armed on ${spec.name}.<init>")
@@ -130,16 +124,14 @@ internal object MediaSpy {
         } ?: return
 
         runCatching {
-            de.robv.android.xposed.XposedBridge.hookMethod(buildMethod, object : de.robv.android.xposed.XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    runCatching {
-                        val req = param.result ?: return
-                        val urlMethod = req.javaClass.getMethod("url")
-                        val httpUrl = urlMethod.invoke(req) ?: return
-                        val urlStr = httpUrl.toString()
-                        if (MediaUrls.isPhoto(urlStr)) {
-                            record(urlStr)
-                        }
+            HookBridge.hook(buildMethod, after = HookBridge.After { call ->
+                runCatching {
+                    val req = call.result ?: return@After
+                    val urlMethod = req.javaClass.getMethod("url")
+                    val httpUrl = urlMethod.invoke(req) ?: return@After
+                    val urlStr = httpUrl.toString()
+                    if (MediaUrls.isPhoto(urlStr)) {
+                        record(urlStr)
                     }
                 }
             })

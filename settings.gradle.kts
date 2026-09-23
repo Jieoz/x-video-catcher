@@ -11,8 +11,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // Legacy XposedBridge API jar. compileOnly only — provided by the framework at runtime.
-        maven("https://api.xposed.info/")
     }
 }
 

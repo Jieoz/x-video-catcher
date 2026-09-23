@@ -13,8 +13,8 @@ android {
         // exercised — the module only ever runs inside that process.
         minSdk = 28
         targetSdk = 35
-        versionCode = 76
-        versionName = "1.58.0"
+        versionCode = 77
+        versionName = "1.59.0"
     }
 
     buildFeatures { buildConfig = true }
@@ -49,9 +49,8 @@ android {
 
     buildTypes {
         // Shrinking stays off. R8 would rename this module's own classes, and the entry point in
-        // assets/xposed_init is resolved by name at load time — a renamed entry class means
-        // LSPosed silently loads nothing. Keeping names intact also keeps logcat readable, which
-        // matters more than APK size for a payload with no dependencies.
+        // META-INF/xposed/java_init.list is resolved by name at load time — a renamed entry class
+        // means LSPosed silently loads nothing.
         debug {
             isMinifyEnabled = false
             if (hasFixedKey) signingConfig = signingConfigs.getByName("fixed")
@@ -78,9 +77,10 @@ android {
 }
 
 dependencies {
-    // Xposed API: compile-only by definition. The framework provides these classes at runtime;
-    // packaging them would collide with the host's copy and break loading.
-    compileOnly("de.robv.android.xposed:api:82")
+    // libxposed API 102: compile-only. LSPosed 2.2+ provides it at runtime. Packaging it would
+    // collide with the framework copy. Legacy XposedBridge is intentionally absent: 2.3 removes
+    // the world-readable preference bridge this module used to depend on.
+    compileOnly("io.github.libxposed:api:102.0.0")
 
     // Nothing else. HTTP is HttpURLConnection, storage is MediaStore, host access is reflection.
     // A DI/JSON/networking library here would ship into X's process for work the platform does.

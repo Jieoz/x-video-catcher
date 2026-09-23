@@ -35,8 +35,7 @@ import org.junit.Test
 class ModuleIconWiringTest {
 
     private companion object {
-        const val ZYGOTE_HOOK = "de/robv/android/xposed/IXposedHookZygoteInit"
-        const val LOAD_PACKAGE_HOOK = "de/robv/android/xposed/IXposedHookLoadPackage"
+        const val MODULE_INTERFACE = "io/github/libxposed/api/XposedModuleInterface"
     }
 
     // The name as a literal, not `XVideoCatcherModule::class.java.name`. Referencing the class object
@@ -46,40 +45,24 @@ class ModuleIconWiringTest {
     private val moduleClass = ClassFile.of("com.jiesa.xvideocatcher.hook.XVideoCatcherModule")
 
     @Test
-    fun `module declares the zygote hook interface`() {
+    fun `module extends the modern xposed module`() {
         assertTrue(
-            "XVideoCatcherModule must implement IXposedHookZygoteInit or initZygote is never " +
-                "called; declared: ${moduleClass.interfaces}",
-            ZYGOTE_HOOK in moduleClass.interfaces,
+            "XVideoCatcherModule must extend XposedModule or LSPosed never loads it; " +
+                "super: ${moduleClass.superName}",
+            MODULE_INTERFACE == moduleClass.superName,
         )
     }
 
     @Test
-    fun `module still declares the load-package hook`() {
-        // The pre-existing contract. Asserted so that adding the zygote interface cannot quietly
-        // displace the one that installs every hook.
-        assertTrue(
-            "declared: ${moduleClass.interfaces}",
-            LOAD_PACKAGE_HOOK in moduleClass.interfaces,
-        )
+    fun `module declares the load callbacks`() {
+        assertTrue("declared methods: ${moduleClass.methods}", "onModuleLoaded" in moduleClass.methods)
+        assertTrue("declared methods: ${moduleClass.methods}", "onPackageReady" in moduleClass.methods)
     }
 
     @Test
-    fun `module declares initZygote`() {
+    fun `onModuleLoaded writes the module path`() {
         assertTrue(
-            "declared methods: ${moduleClass.methods}",
-            "initZygote" in moduleClass.methods,
-        )
-    }
-
-    @Test
-    fun `initZygote writes the module path`() {
-        // The interface alone is not enough: an empty override satisfies Xposed and still leaves the
-        // icon broken. `modulePath` is a @Volatile var on an object, so Kotlin emits a setter, and the
-        // reference to it has to appear in this class's constant pool for the write to exist at all.
-        assertTrue(
-            "XVideoCatcherModule must call ModuleIcon.setModulePath(...); an empty initZygote " +
-                "compiles fine and reproduces the 1.51 bluetooth-icon bug",
+            "XVideoCatcherModule must call ModuleIcon.setModulePath(...)",
             moduleClass.references("setModulePath"),
         )
         assertTrue(moduleClass.references("ModuleIcon"))
@@ -103,6 +86,7 @@ class ModuleIconWiringTest {
      * being read here (JVMS §4.1) has not changed in the ways that matter since Java 1.0.
      */
     private class ClassFile(
+        val superName: String,
         val interfaces: List<String>,
         val methods: List<String>,
         private val utf8: Set<String>,
@@ -150,7 +134,11 @@ class ModuleIconWiringTest {
 
                 input.readUnsignedShort() // access_flags
                 input.readUnsignedShort() // this_class
-                input.readUnsignedShort() // super_class
+                val superIndex = input.readUnsignedShort()
+                val superNameIndex = classEntries[superIndex]
+                    ?: error("super $superIndex is not a CONSTANT_Class")
+                val superName = utf8[superNameIndex]
+                    ?: error("super name $superNameIndex is not a UTF-8 entry")
 
                 val interfaceCount = input.readUnsignedShort()
                 val interfaces = (0 until interfaceCount).map {
@@ -173,7 +161,7 @@ class ModuleIconWiringTest {
                     skipAttributes(input)
                 }
 
-                return ClassFile(interfaces, methods, utf8.values.toSet())
+                return ClassFile(superName, interfaces, methods, utf8.values.toSet())
             }
 
             private fun skipMember(input: DataInputStream) {
