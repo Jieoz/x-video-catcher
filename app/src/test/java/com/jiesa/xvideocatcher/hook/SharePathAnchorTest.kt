@@ -187,7 +187,11 @@ class SharePathAnchorTest {
         val owners = points.map { it.method.declaringClass.name }.toSet()
         assertEquals(
             "all dispatch points must be hooked — hooking one and assuming coverage is the 1.3.0 bug",
-            setOf("com.x.share.impl.b", "com.x.dms.components.sharesheet.q"),
+            setOf(
+                "com.x.share.impl.b",
+                "com.x.share.impl.x127",
+                "com.x.dms.components.sharesheet.q",
+            ),
             owners,
         )
     }
@@ -226,6 +230,15 @@ class SharePathAnchorTest {
     }
 
     @Test
+    fun `dispatch accepts a renamed no-arg state accessor`() {
+        val owners = dispatchPoints().map { it.method.declaringClass.name }
+        assertTrue(
+            "X 12.27 renamed getState() but still owns a no-arg state accessor, got $owners",
+            owners.contains("com.x.share.impl.x127"),
+        )
+    }
+
+    @Test
     fun `dispatch rejects a class without getState`() {
         // Decoy sharesheet.j: takes (t) -> void but owns no state. Telemetry forwarders match that
         // signature; hooking one observes a tap but cannot suppress it.
@@ -238,8 +251,11 @@ class SharePathAnchorTest {
 
     @Test
     fun `dispatch is found by signature not by name`() {
-        for (p in dispatchPoints()) {
-            assertEquals("onAction", p.method.name)
+        val points = dispatchPoints()
+        val names = points.map { it.method.name }.toSet()
+        assertTrue("12.13 readable fixture missing, got $names", "onAction" in names)
+        assertTrue("12.27 renamed fixture missing, got $names", "a" in names)
+        for (p in points) {
             assertEquals(1, p.method.parameterTypes.size)
             assertEquals(Void.TYPE, p.method.returnType)
         }
@@ -322,6 +338,7 @@ class SharePathAnchorTest {
             "com.x.models.share.d",
             "com.x.models.share.e",
             "com.x.share.impl.b",
+            "com.x.share.impl.x127",
             "com.x.share.impl.c",
             "com.x.share.impl.d",
             "com.x.share.impl.e",

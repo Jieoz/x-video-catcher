@@ -8,7 +8,12 @@ Everything runs inside X's process. There is no service or background process. T
 small launcher settings screen for the opt-in diagnostic-log switch; downloading itself remains an
 LSPosed hook inside X, with no standalone downloader or persistent process.
 
-> ### 1.57.0 restores X 12.24 row construction
+> ### 1.58.0 restores X 12.27 dispatch
+>
+> X 12.27.1 renamed the sheet state accessor away from `getState()`. v1.57 still required that
+> literal name, resolved zero dispatch points, and suppressed the download row. v1.58 accepts any
+> public no-arg state accessor while still rejecting stateless telemetry forwarders. X 12.24 row
+> construction from v1.57 remains in place.
 >
 > X 12.24 stores the row icon in an `Object` field even though the row constructor still requires a
 > `Drawable`. 1.56 resolved the row/state/action/dispatch chain, but rejected that real constructor

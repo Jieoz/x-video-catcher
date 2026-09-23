@@ -171,24 +171,23 @@ internal object HostResolver {
 
 
     /**
-     * Every method receiving a sheet action: `(actionRoot) -> void` on a class that also declares a
-     * no-arg `getState()`.
+     * Every method receiving a sheet action: `(actionRoot) -> void` on a class that also owns a
+     * no-arg state accessor.
      *
      * The action root is [actionClass]'s superclass — the sealed parent — so a tap on any row type
      * arrives here. Returns *all* matches: on 12.13 there are three (the interface and two
      * implementations), and hooking one while assuming coverage is the mistake 1.3.0 made.
      *
-     * `getState()` is part of the predicate because it survives obfuscation: it is a Kotlin property
-     * accessor on an interface, so its name is fixed by the JVM naming convention rather than chosen
-     * by R8.
+     * The accessor was literally `getState()` on 12.13. X 12.27.1 renamed it to a single letter and
+     * changed its return type, so requiring that name resolves zero dispatch points and suppresses
+     * the download row. Any public no-arg non-void instance method counts; telemetry forwarders
+     * still fail because they own no state.
      */
     fun dispatchPoints(classLoader: ClassLoader, actionRoot: Class<*>): List<DispatchPoint> {
         val found = mutableListOf<DispatchPoint>()
         val seen = mutableSetOf<String>()
         for (cls in candidateClasses(classLoader, SHARE_NEEDLE)) {
-            val hasState = cls.declaredMethods.any {
-                it.name == "getState" && it.parameterTypes.isEmpty()
-            }
+            val hasState = hasStateAccessor(cls)
             if (!hasState) continue
             for (m in cls.declaredMethods) {
                 if (m.returnType != Void.TYPE) continue
@@ -213,6 +212,22 @@ internal object HostResolver {
         }
         return found
     }
+
+    /**
+     * True when [cls] exposes the sheet state as a public no-arg instance method.
+     *
+     * The readable form is `getState()`. Obfuscated hosts rename it, and 12.27 also changed the
+     * return type from `String` to a state object. Constructors, static methods, and `void`
+     * methods cannot satisfy this clause.
+     */
+    private fun hasStateAccessor(cls: Class<*>): Boolean =
+        cls.declaredMethods.any {
+            it.name != "<init>" &&
+                it.parameterTypes.isEmpty() &&
+                it.returnType != Void.TYPE &&
+                !Modifier.isStatic(it.modifiers) &&
+                Modifier.isPublic(it.modifiers)
+        }
 
     /**
      * The sheet's state type, read off the classes that already resolved as dispatch points.
