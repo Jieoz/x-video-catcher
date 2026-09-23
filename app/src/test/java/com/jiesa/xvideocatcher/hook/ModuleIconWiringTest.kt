@@ -35,7 +35,7 @@ import org.junit.Test
 class ModuleIconWiringTest {
 
     private companion object {
-        const val MODULE_INTERFACE = "io/github/libxposed/api/XposedModuleInterface"
+        const val MODULE_CLASS = "io/github/libxposed/api/XposedModule"
     }
 
     // The name as a literal, not `XVideoCatcherModule::class.java.name`. Referencing the class object
@@ -49,7 +49,7 @@ class ModuleIconWiringTest {
         assertTrue(
             "XVideoCatcherModule must extend XposedModule or LSPosed never loads it; " +
                 "super: ${moduleClass.superName}",
-            MODULE_INTERFACE == moduleClass.superName,
+            MODULE_CLASS == moduleClass.superName,
         )
     }
 
