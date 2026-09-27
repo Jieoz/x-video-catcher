@@ -47,8 +47,17 @@ internal object DiagSink {
      *
      * Keeping both facing the same constant is what prevents the pair drifting apart again.
      */
+    /**
+     * Date plus a random suffix, stable for the life of this process.
+     *
+     * A bare date collided: two sessions on the same day resolved to one display name, and the later
+     * one appended into, or MediaStore-duplicated over, the earlier file. The suffix is chosen once,
+     * not per call, because find-or-create depends on the name staying constant across flushes.
+     */
+    private val sessionSuffix: String = java.util.UUID.randomUUID().toString().substring(0, 6)
+
     fun fileName(now: Date = Date()): String =
-        "xvc-diag-${SimpleDateFormat("yyyyMMdd", Locale.US).format(now)}$EXT"
+        "xvc-diag-${SimpleDateFormat("yyyyMMdd", Locale.US).format(now)}-$sessionSuffix$EXT"
 
     /**
      * The path shown to the user. Must equal where [append] actually writes: drift here sends

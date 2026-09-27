@@ -90,9 +90,14 @@ class DiagSinkTest {
     }
 
     @Test
-    fun `file name carries the date`() {
+    fun `file name carries the date and a session suffix`() {
         val day = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
-        assertEquals("xvc-diag-$day.txt", DiagSink.fileName())
+        val name = DiagSink.fileName()
+        assertTrue(
+            "expected xvc-diag-$day-<suffix>.txt, got $name",
+            name.matches(Regex("xvc-diag-$day-[0-9a-f]{6}\\.txt")),
+        )
+        assertEquals(name, DiagSink.fileName())
     }
 
     /**
