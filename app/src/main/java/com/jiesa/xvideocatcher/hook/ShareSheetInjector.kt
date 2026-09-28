@@ -2,7 +2,6 @@ package com.jiesa.xvideocatcher.hook
 
 import com.jiesa.xvideocatcher.DiagLog
 import com.jiesa.xvideocatcher.HostLog
-import com.jiesa.xvideocatcher.ModuleSettings
 import java.lang.reflect.Constructor
 
 /**

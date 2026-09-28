@@ -17,6 +17,9 @@ import org.junit.Test
  *
  * Persistence is captured through the writer seam, so these assert what the queue hands to the sink
  * and in what order. [DiagSinkTest] covers the bytes that reach disk.
+ *
+ * Switch model: read once at host startup, no polling (see [DiagLog] docs). A change applies when X
+ * is force-stopped and reopened; there is no resampling, so nothing here drives a clock.
  */
 class DiagLogTest {
 
@@ -34,6 +37,21 @@ class DiagLogTest {
     @After
     fun tearDown() {
         DiagLog.resetForTest()
+    }
+
+    @Test
+    fun `default is off, so a line before enabling writes nothing and starts no thread`() {
+        DiagLog.resetForTest()
+        assertFalse("default is off", DiagLog.isEnabled())
+
+        var wrote = false
+        DiagLog.writer = { wrote = true; true }
+        DiagLog.bindForTest()
+        repeat(50) { DiagLog.line("record-$it") }
+        DiagLog.flushNow()
+
+        assertFalse("a line was written while the switch was off", wrote)
+        assertEquals("lines were queued while the switch was off", 0, DiagLog.queueSize())
     }
 
     @Test
@@ -132,6 +150,29 @@ class DiagLogTest {
         assertTrue(DiagLog.path().startsWith("Download/${DiagSink.DIR_NAME}/"))
     }
 
+    /**
+     * Read-once model: turning the switch off drops what is queued and makes [line] a no-op, so the
+     * file stops growing. Unlike the resample model this does not react to a mid-session flip in the
+     * module app until X restarts — which is exactly what the settings screen tells the user.
+     */
+    @Test
+    fun `turning the switch off drops queued records and writes nothing more`() {
+        DiagLog.setSessionTag("t")
+        DiagLog.bindForTest()
+
+        DiagLog.line("while-on")
+        DiagLog.flushNow()
+        assertTrue("record dropped while the switch was on", written.any { it.contains("while-on") })
+
+        DiagLog.setEnabled(false)
+        DiagLog.line("after-off")
+        DiagLog.flushNow()
+        assertTrue(
+            "log kept growing after the switch was turned off",
+            written.none { it.contains("after-off") },
+        )
+    }
+
     @Test
     fun `concurrent drains must not write the same record twice`() {
         // Real defect, observed on device in 1.6.0-probe: xvc-diag-20260804.txt contains 55 extra
@@ -179,112 +220,6 @@ class DiagLogTest {
             "record was written ${writes.count { it.contains("only-once") }} times, expected once",
             1,
             writes.count { it.contains("only-once") },
-        )
-    }
-
-    /**
-     * The 1.53 field defect: "关闭日志功能好像没有效果，日志依旧生成".
-     *
-     * The switch was sampled once when the module attached and cached for the life of X's process,
-     * so flipping it off in the module app changed nothing until the host was force-stopped. These
-     * assert the switch is re-read from its authority while the process keeps running.
-     */
-    @Test
-    fun `turning the switch off while the host runs stops new records`() {
-        DiagLog.setSessionTag("t")
-        DiagLog.bindForTest()
-
-        var userSetting = true
-        var now = 10_000L
-        DiagLog.clock = { now }
-        DiagLog.bindEnabledSource { userSetting }
-
-        DiagLog.line("while-on")
-        DiagLog.flushNow()
-        assertTrue("record dropped while the switch was on", written.any { it.contains("while-on") })
-
-        // User flips the switch off in the module app. The host is not restarted.
-        userSetting = false
-        now += 1_500  // past the resample interval
-
-        DiagLog.line("after-off")
-        DiagLog.flushNow()
-        assertTrue(
-            "log kept growing after the switch was turned off",
-            written.none { it.contains("after-off") },
-        )
-    }
-
-    @Test
-    fun `turning the switch on while the host runs starts recording`() {
-        DiagLog.setSessionTag("t")
-        DiagLog.bindForTest()
-
-        var userSetting = false
-        var now = 10_000L
-        DiagLog.clock = { now }
-        DiagLog.bindEnabledSource { userSetting }
-
-        DiagLog.line("while-off")
-        DiagLog.flushNow()
-        assertTrue(written.none { it.contains("while-off") })
-
-        userSetting = true
-        now += 1_500
-
-        DiagLog.line("after-on")
-        DiagLog.flushNow()
-        assertTrue(
-            "switch turned on but nothing was recorded",
-            written.any { it.contains("after-on") },
-        )
-    }
-
-    @Test
-    fun `the authority is not consulted once per record`() {
-        DiagLog.setSessionTag("t")
-        DiagLog.bindForTest()
-
-        var reads = 0
-        var now = 10_000L
-        DiagLog.clock = { now }
-        DiagLog.bindEnabledSource { reads++; true }
-
-        val afterBind = reads
-        repeat(200) { DiagLog.line("record-$it") }
-
-        assertEquals(
-            "the preference file was read per log record, which puts a stat on every hook path",
-            afterBind,
-            reads,
-        )
-
-        now += 1_500
-        DiagLog.line("later")
-        assertEquals("the switch was never re-read after the interval elapsed", afterBind + 1, reads)
-    }
-
-    @Test
-    fun `a throwing authority leaves the last known setting in place`() {
-        DiagLog.setSessionTag("t")
-        DiagLog.bindForTest()
-
-        var now = 10_000L
-        var explode = false
-        DiagLog.clock = { now }
-        DiagLog.bindEnabledSource {
-            if (explode) throw IllegalStateException("prefs unreadable")
-            true
-        }
-
-        explode = true
-        now += 1_500
-
-        DiagLog.line("kept-on")
-        DiagLog.flushNow()
-        assertTrue(
-            "an unreadable preference silently disabled logging mid-session",
-            written.any { it.contains("kept-on") },
         )
     }
 }

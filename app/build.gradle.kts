@@ -13,8 +13,8 @@ android {
         // exercised — the module only ever runs inside that process.
         minSdk = 28
         targetSdk = 35
-        versionCode = 78
-        versionName = "1.60.0"
+        versionCode = 79
+        versionName = "1.61.0"
     }
 
     buildFeatures { buildConfig = true }
@@ -81,6 +81,13 @@ dependencies {
     // collide with the framework copy. Legacy XposedBridge is intentionally absent: 2.3 removes
     // the world-readable preference bridge this module used to depend on.
     compileOnly("io.github.libxposed:api:102.0.0")
+
+    // The Xposed *service* + its AIDL interface. LSPosed provides only the hook `api` at runtime,
+    // not the service, so these are bundled (implementation). The service is the writable side used
+    // by the settings UI to commit the diagnostic switch; the XposedProvider it declares is merged
+    // into this app's manifest so the framework can bind the service in our own process.
+    implementation(files("libs/libxposed-service-102.0.0.aar"))
+    implementation(files("libs/libxposed-interface-102.0.0.aar"))
 
     // Nothing else. HTTP is HttpURLConnection, storage is MediaStore, host access is reflection.
     // A DI/JSON/networking library here would ship into X's process for work the platform does.

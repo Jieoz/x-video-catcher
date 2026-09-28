@@ -55,7 +55,10 @@ class XVideoCatcherModule : XposedModule() {
         }.getOrNull()
 
         DiagLog.setSessionTag(hostVersion ?: "unknown")
-        DiagLog.bindEnabledSource { ModuleSettings.readDiagEnabledFromHost() }
+        // Read the switch once, here, at host startup — the read-only hook interface. No polling,
+        // no listener: a change applies when X is force-stopped and reopened (see DiagLog docs and
+        // the settings screen copy). While off, DiagLog does nothing and starts no thread.
+        DiagLog.setEnabled(ModuleSettings.readDiagEnabledFromHost())
         DiagLog.bindContext(context)
         DiagLog.line("=== module attached ===")
         DiagLog.line("diag enabled=${DiagLog.isEnabled()}")

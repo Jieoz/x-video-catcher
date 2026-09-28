@@ -149,16 +149,27 @@ jobs:
           # The legacy entry and the world-readable preference marker must both be gone.
           # LSPosed 2.3 removes the bridge those files depend on.
           test -z "$(unzip -l "$APK" | grep -E 'assets/xposed_init|xposedsharedprefs' || true)"
-          # Neither Xposed API may be bundled; the framework provides libxposed at runtime.
+          # The legacy Xposed bridge must be absent (LSPosed 2.3 removes it); the hook API is
+          # compile-only and provided by the framework at runtime, so it must not be packaged.
+          test -z "$(unzip -l "$APK" | grep -Ei 'de/robv/android/xposed' || true)"
           unzip -l "$APK" | grep -q 'classes.dex'
-          test -z "$(unzip -l "$APK" | grep -Ei 'de/robv/android/xposed|io/github/libxposed' || true)"
-          # The probe log must not depend on the hooked app reaching a provider we own.
-          # Under API 30+ package visibility filtering X cannot resolve our authority
-          # (we cannot add <queries> to X's manifest), so such a sink silently drops
-          # every record — which is exactly how the first build shipped broken.
+          # Prove the writable-service wiring is actually in the dex. The switch is committed from
+          # this module's own UI process through the libxposed *service* (XposedServiceHelper ->
+          # XposedService.getRemotePreferences), not through the read-only hook interface — writing
+          # it through the hook interface is what left the switch dead in every earlier build.
+          rm -rf /tmp/xvcdex && mkdir -p /tmp/xvcdex
+          unzip -oq "$APK" 'classes*.dex' -d /tmp/xvcdex
+          strings /tmp/xvcdex/classes*.dex | grep -q 'io/github/libxposed/service/XposedServiceHelper'
+          strings /tmp/xvcdex/classes*.dex | grep -q 'com/jiesa/xvideocatcher/ModuleRuntime'
+          # A provider IS expected now, but only the libxposed service one, bound by the framework in
+          # our own process. It is NOT a log sink X reaches: X reads the switch via the framework and
+          # writes records to MediaStore directly. The old broken design used a module-owned provider
+          # as the sink, which API 30+ package-visibility silently dropped for X — that must not come
+          # back, so assert the only provider authority is exactly the libxposed service's.
           "$BT/aapt2" dump xmltree --file AndroidManifest.xml "$APK" > /tmp/mf.txt
-          test -z "$(grep -A3 'E: provider' /tmp/mf.txt | grep 'authorities' || true)"
-          echo "module contract OK: entry=$ENTRY, no provider-based log sink"
+          AUTHS=$(grep -A3 'E: provider' /tmp/mf.txt | grep -o 'authorities.*"[^"]*"' | sed -E 's/.*"([^"]*)"$/\1/' || true)
+          test "$AUTHS" = "com.jiesa.xvideocatcher.XposedService"
+          echo "module contract OK: entry=$ENTRY, service-backed switch, sink is MediaStore"
 
       # Asserts the URL grammar helpers are really in the artifact, by parsing the dex
       # method table. Two cheaper checks are both unreliable here and were tried first:

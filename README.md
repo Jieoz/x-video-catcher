@@ -8,6 +8,21 @@ Everything runs inside X's process. There is no service or background process. T
 small launcher settings screen for the opt-in diagnostic-log switch; downloading itself remains an
 LSPosed hook inside X, with no standalone downloader or persistent process.
 
+> ### 1.61.0 rebuilds the diagnostic-log switch on the libxposed service
+>
+> The switch is written from the module's own settings screen through the libxposed **service**
+> (`XposedServiceHelper` → `XposedService.getRemotePreferences().commit()`), the only writable
+> interface available in a process where the hook is not loaded. Every earlier build wrote it
+> through the hook interface — a `lateinit` that is null in the settings process and read-only even
+> where present — so the switch silently never took effect.
+>
+> The hook inside X reads the switch **once at startup** through the read-only hook interface. There
+> is no polling and no background thread while logging is off: `line()` does a single volatile read
+> and returns, so a disabled log costs nothing and never wakes the device. The trade-off, stated on
+> the settings screen, is that flipping the switch applies the next time X is **force-stopped and
+> reopened** — the resample loop that used to make it live-effective was removed as pure cost for a
+> log that is off almost all the time. This matches the timeline-unlocker module's design.
+
 > ### 1.58.0 restores X 12.27 dispatch
 >
 > X 12.27.1 renamed the sheet state accessor away from `getState()`. v1.57 still required that

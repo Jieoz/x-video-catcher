@@ -7,14 +7,28 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Diagnostic log for the hook, batched and written to shared storage by [DiagSink].
+ * Diagnostic log for the hook, off by default.
  *
- * **Default off**. Open the module app → Settings to turn on; the switch is re-read while X runs,
- * so turning it off stops the file growing without restarting the host.
- * When disabled, [line] is a no-op and nothing is written to Download/XVideoCatcher/.
+ * ## Switch model (read once, no polling)
  *
- * Exists so the user never needs adb when debugging. Writes are queued on a low-priority
- * daemon; the queue is bounded and drops oldest under flood.
+ * The switch value is read **once**, outside this class, when X starts — the hook samples the
+ * user's setting from libxposed remote preferences ([ModuleSettings.readDiagEnabledFromHost]) and
+ * hands it to [setEnabled] via [bindContext]/attach. There is no listener, no per-record re-read,
+ * and no background thread while the switch is off.
+ *
+ * X keeps its process alive for hours, so a value read at attach is honest only if the UI tells the
+ * user how it takes effect: turning the switch on or off applies the next time X is **force-stopped
+ * and reopened**. [SettingsActivity] says exactly that. (An earlier build promised "下次打开分享面板
+ * 即生效", which no code implemented — that mismatch, not "read once" itself, was the 1.53 defect.)
+ *
+ * ## Cost
+ *
+ * **While OFF (the default):** [line] does a single volatile read and returns. No queue, no thread,
+ * no MediaStore, no disk, no binder — zero wake-ups and zero battery cost. The drain thread is
+ * created only when the switch is on.
+ *
+ * **While ON:** records are queued and drained on one low-priority daemon; the queue is bounded and
+ * drops oldest under flood. [DiagSink] writes the bytes to Download/XVideoCatcher/.
  */
 object DiagLog {
 
@@ -49,84 +63,25 @@ object DiagLog {
     private var sessionTag: String = "?"
 
     /**
-     * Master switch. Default off; the host turns it on from the user's stored preference.
-     *
-     * This is a *cache* of [enabledSource], not the authority. See [currentlyEnabled].
+     * Master switch. Default off. The host reads the user's stored preference once at attach and
+     * calls [setEnabled]; the value then stands for the life of X's process (see class docs). No
+     * source callback, no resampling — a changed setting applies when X is force-stopped and
+     * reopened, exactly as the settings screen states.
      */
     @Volatile
     private var enabled: Boolean = false
 
-    /**
-     * Live view of the user's setting, or null when nobody supplied one (tests, and the window
-     * before the host binds).
-     *
-     * ## Why a source and not just a value
-     *
-     * Until 1.54 the host sampled the preference exactly once, in `handleLoadPackage`, and stored
-     * the result here for the life of the process. Turning the switch **off** therefore did nothing
-     * observable: X keeps its process alive for hours, so the module went on writing with the value
-     * it read at attach. The settings screen even promised "改完后下次打开分享面板即生效", which no code
-     * implemented. The switch only ever appeared to work when the user happened to restart X.
-     *
-     * The fix has to be re-reading, not a wider default: the authority is a file the *other* process
-     * owns, so any cached copy here is stale by construction.
-     */
-    @Volatile
-    private var enabledSource: (() -> Boolean)? = null
-
-    @Volatile
-    private var lastSampledAt = 0L
-
-    /**
-     * How stale the cached switch may be. Re-reading is a `stat` plus, when the file changed, a
-     * small parse — cheap, but [line] is called ~160 places on interaction paths, so it is not run
-     * per record. A second of latency on a manual toggle is imperceptible; a `stat` per log line
-     * would not be.
-     */
-    private const val RESAMPLE_INTERVAL_MS = 1_000L
-
-    /**
-     * Time source, as a seam. Real elapsed time would make the re-read test either slow (sleep past
-     * the interval) or flaky, and a test that sleeps is a test that gets deleted.
-     */
-    @Volatile
-    internal var clock: () -> Long = { System.currentTimeMillis() }
-
-    fun isEnabled(): Boolean = currentlyEnabled()
-
-    /**
-     * Binds the authority for the switch. Sampled immediately, then at most every
-     * [RESAMPLE_INTERVAL_MS] from [line].
-     */
-    fun bindEnabledSource(source: () -> Boolean) {
-        enabledSource = source
-        setEnabled(runCatching { source() }.getOrDefault(false))
-    }
+    fun isEnabled(): Boolean = enabled
 
     fun setEnabled(value: Boolean) {
         enabled = value
-        lastSampledAt = clock()
-        if (!value) {
-            // Drop anything already queued so a later enable starts clean, and so that turning the
-            // switch off cannot flush records captured while it was on.
+        if (value) {
+            startDrainer()
+        } else {
+            // Off means off with nothing left behind: drop anything queued so we neither write it
+            // now nor on a later enable.
             synchronized(lock) { queue.clear() }
         }
-    }
-
-    /**
-     * The switch as the user currently has it, re-reading the bound source when the cached value has
-     * aged out. Falls back to the cache when no source is bound or the read throws.
-     */
-    private fun currentlyEnabled(): Boolean {
-        val source = enabledSource ?: return enabled
-        val now = clock()
-        if (now - lastSampledAt < RESAMPLE_INTERVAL_MS) return enabled
-        val fresh = runCatching { source() }.getOrElse {
-            lastSampledAt = now
-            return enabled
-        }
-        if (fresh != enabled) setEnabled(fresh) else lastSampledAt = now
-        return enabled
     }
 
     fun setSessionTag(tag: String) {
@@ -137,7 +92,7 @@ object DiagLog {
     fun queueSize(): Int = synchronized(lock) { queue.size }
 
     fun line(text: String) {
-        if (!currentlyEnabled()) return
+        if (!enabled) return
         val formatted = "${stamp.format(Date())} [$sessionTag] $text"
         HostLog.log(formatted)
         synchronized(lock) {
@@ -152,7 +107,7 @@ object DiagLog {
         this.context = context
         writer = { lines -> DiagSink.append(context, lines) }
         bound = true
-        startDrainer()
+        if (enabled) startDrainer()
     }
 
     internal fun bindForTest() {
@@ -180,7 +135,7 @@ object DiagLog {
             synchronized(lock) {
                 while (queue.isEmpty()) lock.wait()
             }
-            if (!currentlyEnabled()) {
+            if (!enabled) {
                 synchronized(lock) { queue.clear() }
                 continue
             }
@@ -194,12 +149,12 @@ object DiagLog {
     }
 
     fun flushNow() {
-        if (!currentlyEnabled()) return
+        if (!enabled) return
         drainOnce()
     }
 
     private fun drainOnce(): Boolean = synchronized(drainLock) {
-        if (!currentlyEnabled()) return false
+        if (!enabled) return false
         if (!bound) {
             // Queued lines with nowhere to go. Silence here is what made "no log file" and "hook
             // never attached" indistinguishable on the last several field builds.
@@ -226,9 +181,7 @@ object DiagLog {
         bound = false
         sessionTag = "?"
         enabled = false  // default off
-        enabledSource = null
-        lastSampledAt = 0L
-        clock = { System.currentTimeMillis() }
+        drainer = null
         writer = { lines ->
             val ctx = context
             if (ctx == null) {
