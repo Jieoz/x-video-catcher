@@ -67,8 +67,12 @@ object ModuleRuntime {
 
     /** Write the switch through the Xposed service. True only when committed to the remote group. */
     fun writeSwitch(group: String, key: String, value: Boolean): Boolean = try {
-        val bound = service ?: return false
-        bound.getRemotePreferences(group).edit().putBoolean(key, value).commit()
+        val bound = service
+        if (bound == null) {
+            false
+        } else {
+            bound.getRemotePreferences(group).edit().putBoolean(key, value).commit()
+        }
     } catch (t: Throwable) {
         false
     }
