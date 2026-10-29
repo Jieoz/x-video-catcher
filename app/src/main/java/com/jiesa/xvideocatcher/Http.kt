@@ -1,5 +1,6 @@
 package com.jiesa.xvideocatcher
 
+import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.HttpURLConnection
@@ -84,6 +85,96 @@ object Http {
     fun bytes(url: String): ByteArray = request(url) { it.readBytes() }
 
     fun text(url: String): String = request(url) { it.readBytes().toString(Charsets.UTF_8) }
+
+    /**
+     * Downloads [url] into [target] with HTTP Range resume.
+     *
+     * Streaming straight into the MediaStore stream meant a mid-transfer stall could not be
+     * recovered without restarting from byte zero — and restarting hit the same stall, so the
+     * progress bar froze at the same offset until the retry budget ran out. Staging into a
+     * cache file changes the failure mode: a timeout or dropped connection aborts only this
+     * connection, and the next attempt asks the CDN for `Range: bytes=N-` and appends.
+     *
+     * A 4xx is still fatal (the URL is expired; no byte offset fixes that). A 200 in reply to
+     * a Range request means the server ignored the header — the cache is discarded and the
+     * body replaces it from zero. Per-connection read timeout (30 s) is the stall detector;
+     * there is no separate watchdog.
+     */
+    fun downloadResumable(
+        url: String,
+        target: File,
+        onBytes: ((Long) -> Unit)? = null,
+        isAborted: (() -> Boolean)? = null,
+    ): Long {
+        val maxConnections = 8
+        var last: Exception? = null
+        for (attempt in 1..maxConnections) {
+            if (isAborted?.invoke() == true) {
+                throw java.io.IOException("download aborted by user")
+            }
+            var conn: HttpURLConnection? = null
+            try {
+                conn = open(url)
+                val have = if (target.exists()) target.length() else 0L
+                var appending = false
+                if (have > 0L) {
+                    conn.setRequestProperty("Range", "bytes=$have-")
+                }
+                val code = conn.responseCode
+                when {
+                    code == 206 -> appending = true
+                    code in 200..299 -> {
+                        // Full-body reply: either a first attempt or a server that ignored
+                        // our Range. Either way the cache starts (or restarts) at zero.
+                        if (have > 0L) DiagLog.line("  http: server ignored Range, restarting")
+                        target.delete()
+                        target.createNewFile()
+                    }
+                    else -> throw HttpError(code, url)
+                }
+                val base: Long = if (appending) have else 0L
+                conn.inputStream.use { input ->
+                    java.io.FileOutputStream(target, appending).use { out ->
+                        val buffer = ByteArray(64 * 1024)
+                        var total = base
+                        var lastReported = base
+                        while (true) {
+                            if (isAborted?.invoke() == true) {
+                                throw java.io.IOException("download aborted by user")
+                            }
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            out.write(buffer, 0, n)
+                            total += n
+                            if (onBytes != null && total - lastReported >= 512 * 1024) {
+                                lastReported = total
+                                onBytes(total)
+                            }
+                        }
+                        out.flush()
+                        onBytes?.invoke(total)
+                    }
+                }
+                return target.length()
+            } catch (e: HttpError) {
+                if (e.code in 400..499) throw e
+                last = e
+            } catch (e: Exception) {
+                last = e
+            } finally {
+                runCatching { conn?.disconnect() }
+            }
+            if (attempt < maxConnections) {
+                if (isAborted?.invoke() == true) throw java.io.IOException("download aborted by user")
+                DiagLog.line(
+                    "  http: transfer interrupted at ${target.length()} bytes " +
+                        "(attempt $attempt), resuming",
+                )
+                Thread.sleep(400L * (attempt + 1))
+            }
+        }
+        throw last ?: java.io.IOException("download failed: ${url.take(140)}")
+    }
 
     /**
      * Streams a response into [sink], returning the byte count.

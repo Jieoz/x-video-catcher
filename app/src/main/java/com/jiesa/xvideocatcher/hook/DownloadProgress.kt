@@ -60,6 +60,9 @@ internal class DownloadProgress(private val strings: ModuleStrings) {
      */
     private val retryActions = ConcurrentHashMap<Int, () -> Unit>()
 
+    /** Live tasks by id, so the retry receiver can abort an in-progress transfer first. */
+    private val liveTasks = ConcurrentHashMap<Int, Task>()
+
     /**
      * One download's notification. Created by [begin]; everything a single download needs in order
      * to throttle and to finish lives here rather than on the shared object.
@@ -67,10 +70,32 @@ internal class DownloadProgress(private val strings: ModuleStrings) {
     internal inner class Task(val id: Int) {
         private var lastPostedAt = 0L
         private var lastPercent = -1
-        @Volatile private var finished = false
+        @Volatile internal var finished = false
+
+        /**
+         * Volatile abort flag for an in-progress transfer. Http.downloadResumable and the
+         * HLS segment loop check it between reads; setting it ends the current connection
+         * within one read timeout instead of waiting for the CDN to stall out.
+         */
+        @Volatile var aborted = false
 
         fun setRetryAction(action: (() -> Unit)?) {
             if (action == null) retryActions.remove(id) else retryActions[id] = action
+        }
+
+        /** Shows the Retry button on the current notification without changing its text. */
+        fun showRetry(context: Context, label: String, percent: Int?, detail: String?) {
+            val nm = manager ?: notificationManager(context) ?: return
+            val n = base(context, label)
+                .setContentText(detail ?: label)
+                .setProgress(100, percent ?: 0, percent == null)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .addAction(
+                    Notification.Action.Builder(null, "重试", retryPendingIntent(context, id)).build(),
+                )
+                .build()
+            runCatching { nm.notify(NOTIF_TAG, id, n) }
         }
 
         /**
@@ -110,6 +135,8 @@ internal class DownloadProgress(private val strings: ModuleStrings) {
             val nm = manager ?: notificationManager(context) ?: return
             if (finished) return
             finished = true
+            liveTasks.remove(id)
+            retryActions.remove(id)
             val builder = base(context, message)
                 .setContentText(message)
                 .setProgress(0, 0, false)
@@ -152,7 +179,13 @@ internal class DownloadProgress(private val strings: ModuleStrings) {
             .setProgress(100, 0, indeterminate)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            // Retry is available from the moment the download starts: a stalled transfer
+            // should be restartable from the shade without waiting for a terminal failure.
+            .addAction(
+                Notification.Action.Builder(null, "重试", retryPendingIntent(context, id)).build(),
+            )
             .build()
+        liveTasks[id] = task
         runCatching { nm.notify(NOTIF_TAG, id, n) }
             .onFailure { DiagLog.line("PROGRESS notify start failed: $it") }
         DiagLog.line("PROGRESS start id=$id label=${label.take(40)}")
@@ -220,6 +253,13 @@ internal class DownloadProgress(private val strings: ModuleStrings) {
             if (action == null) {
                 DiagLog.line("PROGRESS retry pressed but no retry action is retained for id=$id")
                 return
+            }
+            // If the download is still running (stalled mid-transfer), abort its reads so
+            // the worker thread stops within one read timeout instead of hanging on.
+            val live = liveTasks[id]
+            if (live != null && !live.finished) {
+                DiagLog.line("PROGRESS retry pressed on live id=$id: aborting transfer")
+                live.aborted = true
             }
             DiagLog.line("PROGRESS retry pressed id=$id")
             main.post { action.invoke() }

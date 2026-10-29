@@ -215,15 +215,29 @@ internal class HostDownloader(private val strings: ModuleStrings) {
         DiagLog.line("  fetching progressive: ${spec.fileName} <- $url")
         return runCatching {
             MediaSaver.save(context, spec) { out ->
-                Http.copyTo(url, out) { done ->
-                    main.post {
-                        task.update(
-                            context,
-                            strings.progressTitle(context),
-                            null,
-                            formatBytes(done) + " · ${spec.fileName}",
-                        )
-                    }
+                // Stage to cache with Range-resume, then hand the finished file to MediaStore.
+                // A mid-transfer stall now costs one connection, not the whole file.
+                val cache = java.io.File(context.cacheDir, "xvc_dl_${video.mediaId}.mp4")
+                try {
+                    Http.downloadResumable(
+                        url,
+                        cache,
+                        onBytes = { done ->
+                            main.post {
+                                task.update(
+                                    context,
+                                    strings.progressTitle(context),
+                                    null,
+                                    formatBytes(done) + " · ${spec.fileName}",
+                                )
+                            }
+                        },
+                        isAborted = { task.aborted },
+                    )
+                    java.io.FileInputStream(cache).use { src -> src.copyTo(out) }
+                    cache.length()
+                } finally {
+                    cache.delete()
                 }
             }
         }.getOrElse { MediaSaver.Result.Failed(it.message ?: it.javaClass.simpleName, it) }
