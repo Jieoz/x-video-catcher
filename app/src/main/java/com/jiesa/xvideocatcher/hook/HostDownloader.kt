@@ -134,7 +134,7 @@ internal class HostDownloader(private val strings: ModuleStrings) {
             when (result) {
                 is MediaSaver.Result.Saved -> {
                     success++
-                    DiagLog.line("  saved ${spec.fileName} (${result.bytes} bytes)")
+                    DiagLog.line("  saved ${spec.fileName} (${result.bytes} bytes) -> ${result.uri}")
                 }
                 is MediaSaver.Result.AlreadyExists -> {
                     success++
@@ -165,7 +165,7 @@ internal class HostDownloader(private val strings: ModuleStrings) {
             when (result) {
                 is MediaSaver.Result.Saved -> {
                     success++
-                    DiagLog.line("  saved media=${video.mediaId} (${result.bytes} bytes)")
+                    DiagLog.line("  saved media=${video.mediaId} (${result.bytes} bytes) -> ${result.uri}")
                 }
                 is MediaSaver.Result.AlreadyExists -> {
                     success++
@@ -331,7 +331,7 @@ internal class HostDownloader(private val strings: ModuleStrings) {
                             DiagLog.line("  FAILED ${spec.fileName}: ${result.reason}")
                     }
                     if (result is MediaSaver.Result.Saved) {
-                        DiagLog.line("  saved ${spec.fileName} (${result.bytes} bytes)")
+                        DiagLog.line("  saved ${spec.fileName} (${result.bytes} bytes) -> ${result.uri}")
                     } else if (result is MediaSaver.Result.AlreadyExists) {
                         DiagLog.line("  already on disk: ${spec.fileName}")
                     }
@@ -367,7 +367,7 @@ internal class HostDownloader(private val strings: ModuleStrings) {
             val ok = result !is MediaSaver.Result.Failed
             when (result) {
                 is MediaSaver.Result.Saved ->
-                    DiagLog.line("  saved media=$mediaId (${result.bytes} bytes)")
+                    DiagLog.line("  saved media=$mediaId (${result.bytes} bytes) -> ${result.uri}")
                 is MediaSaver.Result.AlreadyExists ->
                     DiagLog.line("  already on disk: media=$mediaId")
                 is MediaSaver.Result.Failed -> {

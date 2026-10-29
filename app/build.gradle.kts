@@ -13,8 +13,8 @@ android {
         // exercised — the module only ever runs inside that process.
         minSdk = 28
         targetSdk = 35
-        versionCode = 79
-        versionName = "1.61.0"
+        versionCode = 80
+        versionName = "1.62.0"
     }
 
     buildFeatures { buildConfig = true }
@@ -72,6 +72,10 @@ android {
             // Robolectric supplies real framework classes, so the URL/naming logic is tested
             // against actual behaviour instead of stubs.
             isIncludeAndroidResources = true
+            // relativeDir() reads Environment.DIRECTORY_* constants that are real fields on
+            // Android but "not mocked" stubs on the JVM. Returning their documented values
+            // keeps the Movies/Pictures mapping testable without booting Robolectric for it.
+            isReturnDefaultValues = true
         }
     }
 }

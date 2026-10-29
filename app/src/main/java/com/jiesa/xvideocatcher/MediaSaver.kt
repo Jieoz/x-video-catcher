@@ -2,6 +2,7 @@ package com.jiesa.xvideocatcher
 
 import android.content.ContentValues
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -12,6 +13,17 @@ import java.io.OutputStream
 
 /**
  * Writes a finished download into the user's shared storage.
+ *
+ * Destination is [Environment.DIRECTORY_MOVIES]/XVideoCatcher (videos) or
+ * [Environment.DIRECTORY_PICTURES]/XVideoCatcher (photos) via MediaStore, so the file shows
+ * up in every gallery app without a manual rescan: MediaStore rows under Movies/Pictures are
+ * what gallery apps actually query. Writing under Download/ (the 1.60-and-earlier path) left
+ * files invisible in galleries — the 10-29 "did it even save?" report is exactly that.
+ *
+ * After the write, [MediaScannerConnection.scanFile] runs once on the saved path. The row was
+ * created by this process so it is already scanned in principle, but OEM providers have been
+ * observed dropping the volume rescan when IS_PENDING clears; the explicit scan is one binder
+ * call per download and makes "saved but never appears" unrepresentable.
  *
  * Timestamps are **download time**:
  * 1. MediaStore `date_added` / `date_modified` / `datetaken`
@@ -42,6 +54,23 @@ object MediaSaver {
         )
     }
 
+    /**
+     * MediaStore RELATIVE_PATH for a kind, with the trailing slash the provider expects.
+     *
+     * Videos go to Movies/XVideoCatcher, photos to Pictures/XVideoCatcher — the two directories
+     * gallery apps index by default. The 1.61 diag logs proved the save path itself was fine
+     * (26.8 MB written, `saved media=…`), yet the user saw nothing: anything under Download/ is
+     * invisible to galleries. This mapping is the fix, so it is pinned by test.
+     *
+     * Literal strings, not Environment.DIRECTORY_*: those constants are just "Movies"/"Pictures"
+     * on every API level this module supports, and the JVM-side android.jar stubs initialise
+     * them to null, which would silently build a "null/XVideoCatcher" path under unit tests.
+     */
+    fun relativeDir(kind: DownloadTarget.Kind): String = when (kind) {
+        DownloadTarget.Kind.VIDEO -> "Movies/$SUBDIR/"
+        DownloadTarget.Kind.PHOTO -> "Pictures/$SUBDIR/"
+    }
+
     fun stampValues(nowMillis: Long = System.currentTimeMillis()): ContentValues {
         val values = ContentValues()
         for ((k, v) in stampMap(nowMillis)) values.put(k, v)
@@ -70,10 +99,7 @@ object MediaSaver {
                 }
         }
 
-        val relative = when (spec.kind) {
-            DownloadTarget.Kind.VIDEO -> "${Environment.DIRECTORY_MOVIES}/$SUBDIR"
-            DownloadTarget.Kind.PHOTO -> "${Environment.DIRECTORY_PICTURES}/$SUBDIR"
-        }
+        val relative = relativeDir(spec.kind)
 
         val now = System.currentTimeMillis()
         val values = ContentValues().apply {
@@ -83,6 +109,9 @@ object MediaSaver {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(MediaStore.MediaColumns.RELATIVE_PATH, relative)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
+            } else if (spec.kind == DownloadTarget.Kind.VIDEO) {
+                // Pre-Q: absolute path column instead of RELATIVE_PATH.
+                put(MediaStore.Video.Media.DATA, "/sdcard/Movies/$SUBDIR/${spec.fileName}")
             }
         }
 
@@ -117,6 +146,7 @@ object MediaSaver {
             runCatching {
                 resolver.update(uri, stampValues(System.currentTimeMillis()), null, null)
             }
+            requestScan(context, uri.toString())
             Result.Saved(uri.toString(), written)
         } catch (t: Throwable) {
             runCatching { resolver.delete(uri, null, null) }
@@ -149,6 +179,23 @@ object MediaSaver {
             return cache.length()
         } finally {
             cache.delete()
+        }
+    }
+
+    /**
+     * Explicit MediaScanner pass on the saved row.
+     *
+     * The row is created by this process with IS_PENDING, so clearing the flag should publish it —
+     * but OEM providers have been observed skipping the volume rescan at IS_PENDING clear, which
+     * leaves the file on disk yet invisible in galleries. One scanFile call closes that gap; never
+     * fatal, so failures are logged and swallowed.
+     */
+    private fun requestScan(context: Context, uri: String) {
+        runCatching {
+            MediaScannerConnection.scanFile(context, arrayOf(uri), null) { _, _ -> }
+            DiagLog.line("  mediastore scan requested: $uri")
+        }.onFailure {
+            DiagLog.line("  mediastore scan request failed: ${it.javaClass.simpleName}")
         }
     }
 

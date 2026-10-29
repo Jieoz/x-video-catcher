@@ -19,4 +19,13 @@ class MediaSaverStampTest {
         assertEquals(now / 1000L, v[MediaSaver.COL_DATE_MODIFIED])
         assertEquals(now, v[MediaSaver.COL_DATE_TAKEN])
     }
+
+    @Test
+    fun videosLandInMoviesAndPhotosInPictures() {
+        // Assert the mapping against literal values, not Environment.DIRECTORY_*: the JVM-side
+        // android.jar stubs have empty static initializers, so those constants read null here
+        // even though they are "Movies"/"Pictures" on every real device.
+        assertEquals("Movies/XVideoCatcher/", MediaSaver.relativeDir(DownloadTarget.Kind.VIDEO))
+        assertEquals("Pictures/XVideoCatcher/", MediaSaver.relativeDir(DownloadTarget.Kind.PHOTO))
+    }
 }
