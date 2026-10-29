@@ -138,7 +138,8 @@ internal class HostDownloader(private val strings: ModuleStrings) {
                 }
                 is MediaSaver.Result.AlreadyExists -> {
                     success++
-                    DiagLog.line("  already on disk: ${spec.fileName}")
+                    DiagLog.line("  already on disk: ${spec.fileName} -> ${result.uri}")
+                    main.post { toast(context, strings.duplicateLabel(context, spec.fileName)) }
                 }
                 is MediaSaver.Result.Failed ->
                     DiagLog.line("  FAILED ${spec.fileName}: ${result.reason}")
@@ -169,7 +170,13 @@ internal class HostDownloader(private val strings: ModuleStrings) {
                 }
                 is MediaSaver.Result.AlreadyExists -> {
                     success++
-                    DiagLog.line("  already on disk: media=${video.mediaId}")
+                    DiagLog.line("  already on disk: media=${video.mediaId} -> ${result.uri}")
+                    main.post {
+                        val name = DownloadTarget.videoSpec(
+                            video.mediaId, video.width, video.height,
+                        ).fileName
+                        toast(context, strings.duplicateLabel(context, name))
+                    }
                 }
                 is MediaSaver.Result.Failed -> {
                     DiagLog.line("  FAILED media=${video.mediaId}: ${result.reason}")
@@ -333,7 +340,8 @@ internal class HostDownloader(private val strings: ModuleStrings) {
                     if (result is MediaSaver.Result.Saved) {
                         DiagLog.line("  saved ${spec.fileName} (${result.bytes} bytes) -> ${result.uri}")
                     } else if (result is MediaSaver.Result.AlreadyExists) {
-                        DiagLog.line("  already on disk: ${spec.fileName}")
+                        DiagLog.line("  already on disk: ${spec.fileName} -> ${result.uri}")
+                        main.post { toast(context, strings.duplicateLabel(context, spec.fileName)) }
                     }
                 }
                 DiagLog.flushNow()
@@ -368,8 +376,10 @@ internal class HostDownloader(private val strings: ModuleStrings) {
             when (result) {
                 is MediaSaver.Result.Saved ->
                     DiagLog.line("  saved media=$mediaId (${result.bytes} bytes) -> ${result.uri}")
-                is MediaSaver.Result.AlreadyExists ->
-                    DiagLog.line("  already on disk: media=$mediaId")
+                is MediaSaver.Result.AlreadyExists -> {
+                    DiagLog.line("  already on disk: media=$mediaId -> ${result.uri}")
+                    main.post { toast(context, strings.duplicateLabel(context, "$mediaId.mp4")) }
+                }
                 is MediaSaver.Result.Failed -> {
                     DiagLog.line("  FAILED media=$mediaId: ${result.reason}")
                     HostLog.log("${hit.url} failed: ${result.reason}")

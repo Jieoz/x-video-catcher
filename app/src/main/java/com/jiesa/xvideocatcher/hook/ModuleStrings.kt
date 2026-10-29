@@ -22,6 +22,11 @@ internal class ModuleStrings {
     fun successLabel(context: Context, count: Int): String =
         if (isChinese(context)) "已保存 $count 个文件到相册" else "Saved $count file(s)"
 
+    /** Already-on-disk notice: tells the user nothing was re-downloaded and where it is. */
+    fun duplicateLabel(context: Context, fileName: String): String =
+        if (isChinese(context)) "文件已存在：$fileName（Movies/XVideoCatcher）"
+        else "File already exists: $fileName (Movies/XVideoCatcher)"
+
     fun failureLabel(context: Context): String =
         if (isChinese(context)) "下载失败" else "Download failed"
 
