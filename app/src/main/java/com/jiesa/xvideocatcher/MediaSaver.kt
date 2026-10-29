@@ -214,11 +214,26 @@ object MediaSaver {
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI
                 }
         }
+        // Dedup is scoped to THIS module's gallery directory. Matching the bare display name
+        // across the whole collection treated a leftover copy in Download/XVideoCatcher/ as
+        // "already saved" and skipped the download — so the file the gallery actually indexes
+        // (Movies/XVideoCatcher/) never appeared. A copy outside our directory is not a copy
+        // the user can see in the gallery; only a file under our own RELATIVE_PATH counts.
+        val selection: String
+        val args: Array<String>
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            selection = "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND " +
+                "${MediaStore.MediaColumns.DISPLAY_NAME} = ?"
+            args = arrayOf(relativeDir(spec.kind), spec.fileName)
+        } else {
+            selection = "${MediaStore.MediaColumns.DISPLAY_NAME} = ?"
+            args = arrayOf(spec.fileName)
+        }
         context.contentResolver.query(
             collection,
             arrayOf(MediaStore.MediaColumns._ID),
-            "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
-            arrayOf(spec.fileName),
+            selection,
+            args,
             null,
         )?.use { c ->
             if (c.moveToFirst()) {
